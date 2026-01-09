@@ -11,7 +11,7 @@ export default function Home() {
           Claim 10 USDC on Arc Testnet
         </h1>
         <p className="text-zinc-300 max-w-2xl">
-          Simple gated faucet flow: pay a small amount on Base, connect your X account, follow {handle},
+          Simple gated faucet flow: pay a small amount on Base, connect your X account, follow,
           then receive <span className="font-semibold">10 USDC</span> on Arc Testnet.
         </p>
 
