@@ -9,7 +9,7 @@ A gated faucet site:
 
 > Notes:
 > - Arc uses **USDC as the gas token** — your Arc treasury wallet must hold enough testnet USDC for gas + rewards.
-> - X API access level/tier may affect follow endpoints. If your app is not allowed to use `follows.write`, the follow step will fail.
+> - X API access level/tier may affect follow endpoints. If your app is not allowed to use `follows.write`, the follow step will fail. 
 
 ## Tech
 - Next.js (App Router)
