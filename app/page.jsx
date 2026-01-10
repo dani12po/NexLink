@@ -1,67 +1,129 @@
-import StepCard from "@/components/StepCard";
+'use client'
 
-export default function Home() {
-  const handle = process.env.NEXT_PUBLIC_X_TARGET_HANDLE || "@iq_dani26";
-  const priceLabel = process.env.NEXT_PUBLIC_PAYMENT_LABEL || "0.1 USDC on Base";
+import React from 'react'
+import { useAccount, useSendTransaction, useWaitForTransactionReceipt } from 'wagmi'
+import { parseEther } from 'viem'
+
+const RECEIVER = process.env.NEXT_PUBLIC_PAYMENT_RECEIVER
+const PAY_ETH = process.env.NEXT_PUBLIC_PAY_ETH ?? '0.00005' // contoh, sesuaikan
+
+export default function Page() {
+  const { address, isConnected } = useAccount()
+
+  // --- payment tx ---
+  const { data: hash, sendTransaction, isPending: isSending } = useSendTransaction()
+
+  // tunggu 1 konfirmasi
+  const {
+    isLoading: isConfirming,
+    isSuccess: isConfirmed,
+    error: confirmError,
+  } = useWaitForTransactionReceipt({
+    hash,
+    confirmations: 1,
+    query: { enabled: Boolean(hash) },
+  })
+
+  // --- gate states ---
+  const [cooldown, setCooldown] = React.useState(0)
+  const [paid, setPaid] = React.useState(false)
+  const [twitterEnabled, setTwitterEnabled] = React.useState(false)
+
+  // (opsional) biar kalau refresh gak hilang
+  React.useEffect(() => {
+    const saved = localStorage.getItem('payTxHash')
+    if (saved && !hash) {
+      // kamu bisa set state khusus buat “rehydrate” hash jika pakai wagmi store,
+      // paling simpel: panggil API verify tx hash di sini.
+    }
+  }, [hash])
+
+  // saat tx confirmed -> mark paid -> mulai countdown 10 detik
+  React.useEffect(() => {
+    if (!isConfirmed) return
+
+    setPaid(true)
+    setTwitterEnabled(false)
+    setCooldown(10)
+
+    // simpan hash supaya gak hilang
+    if (hash) localStorage.setItem('payTxHash', hash)
+
+    // OPTIONAL tapi recommended:
+    // setelah confirmed, panggil backend verify biar server tau user ini “paid”
+    ;(async () => {
+      try {
+        await fetch('/api/verify-payment', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ txHash: hash, userAddress: address }),
+        })
+      } catch (e) {
+        // kalau gagal, UI tetap jalan, tapi claim bisa kamu blok di server
+      }
+    })()
+  }, [isConfirmed, hash, address])
+
+  // countdown tick
+  React.useEffect(() => {
+    if (cooldown <= 0) return
+    const t = setInterval(() => setCooldown((s) => s - 1), 1000)
+    return () => clearInterval(t)
+  }, [cooldown])
+
+  React.useEffect(() => {
+    if (cooldown === 0 && paid) setTwitterEnabled(true)
+  }, [cooldown, paid])
+
+  const onPay = () => {
+    if (!RECEIVER) return alert('Missing NEXT_PUBLIC_PAYMENT_RECEIVER')
+    sendTransaction({
+      to: RECEIVER,
+      value: parseEther(PAY_ETH),
+    })
+  }
 
   return (
-    <div className="space-y-8">
-      <div className="space-y-3">
-        <h1 className="text-3xl sm:text-4xl font-semibold tracking-tight">
-          Claim 10 USDC on Arc Testnet
-        </h1>
-        <p className="text-zinc-300 max-w-2xl">
-          Simple gated faucet flow: pay a small amount on Base, connect your X account, follow{handle},
-          then receive <span className="font-semibold">10 USDC</span> on Arc Testnet. 
+    <div style={{ padding: 24, maxWidth: 520 }}>
+      <h2>Arc Faucet</h2>
+
+      {!isConnected && (
+        <p>Connect wallet dulu.</p>
+      )}
+
+      {isConnected && !paid && (
+        <button onClick={onPay} disabled={isSending || isConfirming}>
+          {isSending ? 'Confirm di wallet...' : isConfirming ? 'Menunggu konfirmasi onchain...' : `Pay ${PAY_ETH} ETH`}
+        </button>
+      )}
+
+      {confirmError && (
+        <p style={{ color: 'red' }}>
+          Payment gagal / revert: {confirmError.message}
         </p>
+      )}
 
-        <div className="flex gap-3 pt-2">
-          <a
-            className="inline-flex items-center justify-center rounded-xl bg-white text-zinc-900 px-4 py-2 text-sm font-semibold hover:bg-zinc-200 transition"
-            href="/claim"
-          >
-            Open Claim Page
-          </a>
-          <a
-            className="inline-flex items-center justify-center rounded-xl border border-zinc-700 px-4 py-2 text-sm font-semibold text-zinc-200 hover:bg-zinc-900 transition"
-            href="#how"
-          >
-            How it works
-          </a>
+      {paid && cooldown > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <p>✅ Payment confirmed.</p>
+          <p>Aktifkan Twitter dalam: <b>{cooldown}s</b></p>
         </div>
-      </div>
+      )}
 
-      <div id="how" className="grid gap-4 sm:grid-cols-2">
-        <StepCard
-          step="1"
-          title="Pay on Base"
-          desc={`Send ${priceLabel} to the treasury address from your wallet (Base mainnet).`}
-        />
-        <StepCard
-          step="2"
-          title="Login with X"
-          desc="Sign in to X using OAuth2 (PKCE). Your access token stays server-side."
-        />
-        <StepCard
-          step="3"
-          title={`Follow ${handle}`}
-          desc="We request permission to follow the target account using the X API."
-        />
-        <StepCard
-          step="4"
-          title="Receive Arc testnet USDC"
-          desc="After verification, the server sends 10 USDC to your same wallet address on Arc Testnet."
-        />
-      </div>
+      {/* TOMBOL TWITTER baru muncul setelah countdown selesai */}
+      {twitterEnabled && (
+        <div style={{ marginTop: 16 }}>
+          <button onClick={() => (window.location.href = '/api/x/login')}>
+            Connect Twitter
+          </button>
 
-      <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-5 text-sm text-zinc-300">
-        <div className="font-semibold text-zinc-100 mb-2">Notes</div>
-        <ul className="list-disc pl-5 space-y-1">
-          <li>This is a testnet reward. It has no real-world value.</li>
-          <li>If X API access is not enabled for your app tier, follow verification may fail.</li>
-          <li>Gas on Arc is paid in USDC; the treasury wallet must have enough testnet USDC.</li>
-        </ul>
-      </div>
+          {/* setelah login sukses, tampilkan tombol follow */}
+          {/* <button onClick={() => fetch('/api/x/follow', { method: 'POST' })}>Follow @yourhandle</button> */}
+        </div>
+      )}
+
+      {/* Claim hanya aktif jika paid + twitter done */}
+      {/* <button disabled={!paid || !twitterDone}>Claim Faucet</button> */}
     </div>
-  );
+  )
 }

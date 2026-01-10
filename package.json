@@ -10,12 +10,14 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.90.16",
     "@vercel/kv": "^2.0.0",
+    "ethers": "^6.0.0",
     "next": "^14.2.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "viem": "^2.0.0",
-    "ethers": "^6.0.0"
+    "viem": "^2.44.0",
+    "wagmi": "^3.3.0"
   },
   "devDependencies": {
     "autoprefixer": "^10.4.0",
