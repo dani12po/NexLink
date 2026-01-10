@@ -1,8 +1,11 @@
-export const runtime = "nodejs";
-
 import { NextResponse } from "next/server";
-import crypto from "crypto";
-import { getSession, saveSession } from "../../_utils/session";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+function env(name, fallback = "") {
+  return (process.env[name] || fallback).toString().trim();
+}
 
 function base64url(buf) {
   return Buffer.from(buf)
@@ -12,35 +15,60 @@ function base64url(buf) {
     .replace(/=+$/g, "");
 }
 
+function randomString(bytes = 32) {
+  const b = crypto.getRandomValues(new Uint8Array(bytes));
+  return base64url(b);
+}
+
+async function sha256(input) {
+  const data = new TextEncoder().encode(input);
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  return new Uint8Array(hash);
+}
+
 export async function GET() {
-  const APP_URL = process.env.APP_URL || "http://localhost:3000";
-  const CLIENT_ID = process.env.X_CLIENT_ID;
-  const SCOPES = process.env.X_OAUTH_SCOPES || "tweet.read users.read follows.write offline.access";
-  if (!CLIENT_ID) return NextResponse.json({ ok: false, error: "X_CLIENT_ID missing" }, { status: 500 });
+  const APP_URL = env("APP_URL");
+  const X_CLIENT_ID = env("X_CLIENT_ID");
+  const SCOPES = env("X_OAUTH_SCOPES", "tweet.read users.read follows.write offline.access");
 
-  const { sid, data } = await getSession();
+  if (!APP_URL) return NextResponse.json({ ok: false, error: "Missing APP_URL" }, { status: 500 });
+  if (!X_CLIENT_ID) return NextResponse.json({ ok: false, error: "Missing X_CLIENT_ID" }, { status: 500 });
 
-  const verifier = base64url(crypto.randomBytes(32));
-  const challenge = base64url(crypto.createHash("sha256").update(verifier).digest());
-  const state = base64url(crypto.randomBytes(16));
+  // IMPORTANT: no trailing slash
+  const appUrl = APP_URL.replace(/\/+$/, "");
+  const redirectUri = `${appUrl}/api/x/callback`;
 
-  data.x = data.x || {};
-  data.x.pkce_verifier = verifier;
-  data.x.state = state;
+  const state = randomString(24);
+  const codeVerifier = randomString(48);
+  const codeChallenge = base64url(await sha256(codeVerifier));
 
-  await saveSession(sid, data);
+  const authUrl = new URL("https://twitter.com/i/oauth2/authorize");
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("client_id", X_CLIENT_ID);
+  authUrl.searchParams.set("redirect_uri", redirectUri);
+  authUrl.searchParams.set("scope", SCOPES);
+  authUrl.searchParams.set("state", state);
+  authUrl.searchParams.set("code_challenge", codeChallenge);
+  authUrl.searchParams.set("code_challenge_method", "S256");
 
-  const redirectUri = `${APP_URL}/api/x/callback`;
+  const res = NextResponse.redirect(authUrl.toString());
 
-  const url =
-    "https://x.com/i/oauth2/authorize" +
-    `?response_type=code` +
-    `&client_id=${encodeURIComponent(CLIENT_ID)}` +
-    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
-    `&scope=${encodeURIComponent(SCOPES)}` +
-    `&state=${encodeURIComponent(state)}` +
-    `&code_challenge=${encodeURIComponent(challenge)}` +
-    `&code_challenge_method=S256`;
+  // store PKCE in httpOnly cookies
+  const secure = appUrl.startsWith("https://");
+  res.cookies.set("x_oauth_state", state, {
+    httpOnly: true,
+    secure,
+    sameSite: "lax",
+    path: "/",
+    maxAge: 10 * 60, // 10 min
+  });
+  res.cookies.set("x_oauth_verifier", codeVerifier, {
+    httpOnly: true,
+    secure,
+    sameSite: "lax",
+    path: "/",
+    maxAge: 10 * 60,
+  });
 
-  return NextResponse.redirect(url);
+  return res;
 }

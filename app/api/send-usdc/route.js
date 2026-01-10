@@ -1,88 +1,86 @@
-// app/api/send-usdc/route.js
-import { NextResponse } from 'next/server'
+import { NextResponse } from "next/server";
 import {
   createPublicClient,
   createWalletClient,
   http,
-  parseUnits,
   erc20Abi,
-} from 'viem'
-import { base, baseSepolia } from 'viem/chains'
-import { privateKeyToAccount } from 'viem/accounts'
+  parseUnits,
+} from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 
-// Pilih chain yang kamu pakai:
-const CHAIN = (process.env.BASE_CHAIN === 'sepolia') ? baseSepolia : base
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-// USDC address sesuai chain
-const USDC =
-  CHAIN.id === 8453
-    ? '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' // Base mainnet :contentReference[oaicite:5]{index=5}
-    : '0x036CbD53842c5426634e7929541eC2318f3dCF7e' // Base Sepolia :contentReference[oaicite:6]{index=6}
+function mustEnv(name) {
+  const v = process.env[name];
+  if (!v) return null;
+  return v;
+}
 
-const RPC_URL = process.env.BASE_RPC_URL
-const account = privateKeyToAccount(process.env.FAUCET_PK) // 0x...
-
-const publicClient = createPublicClient({ chain: CHAIN, transport: http(RPC_URL) })
-const walletClient = createWalletClient({ chain: CHAIN, transport: http(RPC_URL), account })
+function normalizePk(pk) {
+  if (!pk) return null;
+  // allow with/without 0x
+  return pk.startsWith("0x") ? pk : `0x${pk}`;
+}
 
 export async function POST(req) {
   try {
-    const { to, amount } = await req.json() // amount contoh: "1.25" (USDC)
+    const ARC_RPC_URL = mustEnv("ARC_RPC_URL");
+    const ARC_USDC = mustEnv("ARC_USDC") || mustEnv("ARC_USDC_ERC20");
+    const PK_RAW = mustEnv("ARC_TREASURY_PRIVATE_KEY");
 
+    if (!ARC_RPC_URL || !ARC_USDC || !PK_RAW) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            "Missing env. Required: ARC_RPC_URL, ARC_USDC (or ARC_USDC_ERC20), ARC_TREASURY_PRIVATE_KEY",
+        },
+        { status: 500 }
+      );
+    }
+
+    const pk = normalizePk(PK_RAW);
+    if (!pk) {
+      return NextResponse.json({ ok: false, error: "Invalid private key" }, { status: 500 });
+    }
+
+    const { to, amount } = await req.json(); // amount string: "10"
     if (!to || !amount) {
-      return NextResponse.json({ ok: false, error: 'missing to/amount' }, { status: 400 })
+      return NextResponse.json({ ok: false, error: "missing to/amount" }, { status: 400 });
     }
 
-    // 1) cek decimals (jangan asumsi)
-    const decimals = await publicClient.readContract({
-      address: USDC,
-      abi: erc20Abi,
-      functionName: 'decimals',
-    })
+    // Arc USDC assumed 6 decimals
+    const value = parseUnits(String(amount), 6);
 
-    // 2) parse amount dengan decimals bener
-    const value = parseUnits(String(amount), Number(decimals))
+    const account = privateKeyToAccount(pk);
 
-    // 3) cek saldo USDC faucet
-    const usdcBal = await publicClient.readContract({
-      address: USDC,
-      abi: erc20Abi,
-      functionName: 'balanceOf',
-      args: [account.address],
-    })
-    if (usdcBal < value) {
-      return NextResponse.json({
-        ok: false,
-        error: `insufficient USDC balance. faucet=${account.address}`,
-      }, { status: 400 })
-    }
+    // NOTE: chain object optional; keeping minimal to avoid build-time issues
+    const publicClient = createPublicClient({
+      transport: http(ARC_RPC_URL),
+    });
 
-    // 4) cek ETH gas faucet
-    const ethBal = await publicClient.getBalance({ address: account.address })
-    if (ethBal === 0n) {
-      return NextResponse.json({
-        ok: false,
-        error: `insufficient ETH for gas. faucet=${account.address}`,
-      }, { status: 400 })
-    }
+    const walletClient = createWalletClient({
+      account,
+      transport: http(ARC_RPC_URL),
+    });
 
-    // 5) simulate dulu (biar ketauan kalau bakal revert)
+    // simulate first (helps avoid silent revert)
     const { request } = await publicClient.simulateContract({
       account,
-      address: USDC,
+      address: ARC_USDC,
       abi: erc20Abi,
-      functionName: 'transfer',
+      functionName: "transfer",
       args: [to, value],
-    })
+    });
 
-    // 6) kirim tx
-    const hash = await walletClient.writeContract(request)
+    const hash = await walletClient.writeContract(request);
 
-    return NextResponse.json({ ok: true, hash })
+    return NextResponse.json({ ok: true, hash });
   } catch (e) {
-    return NextResponse.json({
-      ok: false,
-      error: e?.shortMessage || e?.message || 'unknown error',
-    }, { status: 500 })
+    return NextResponse.json(
+      { ok: false, error: e?.shortMessage || e?.message || "unknown" },
+      { status: 500 }
+    );
   }
 }
