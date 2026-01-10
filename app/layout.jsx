@@ -1,5 +1,6 @@
 import "./globals.css";
 import HeaderWallet from "./header-wallet";
+import { Analytics } from "@vercel/analytics/next";
 
 export const metadata = {
   title: "Arc Claim Gate",
@@ -36,6 +37,7 @@ export default function RootLayout({ children }) {
             </div>
           </footer>
         </div>
+        <Analytics />
       </body>
     </html>
   );
