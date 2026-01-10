@@ -1,5 +1,6 @@
 import "./globals.css";
 import HeaderWallet from "./header-wallet";
+import { SpeedInsights } from "@vercel/speed-insights/next";
 
 export const metadata = {
   title: "Arc Claim Gate",
@@ -36,6 +37,7 @@ export default function RootLayout({ children }) {
             </div>
           </footer>
         </div>
+        <SpeedInsights />
       </body>
     </html>
   );
