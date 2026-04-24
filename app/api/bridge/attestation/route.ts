@@ -1,33 +1,26 @@
 /**
  * app/api/bridge/attestation/route.ts
- * Server-side proxy ke Circle Iris V2 API — bypass CORS di browser.
  *
- * Strategi dual-endpoint:
- *   1. /v2/messages/{sourceDomain}?transactionHash={txHash}  ← preferred
- *   2. /v2/attestations/{messageHash}                        ← fallback
+ * CATATAN PENTING: Endpoint ini hanya sebagai FALLBACK.
+ * Primary attestation polling dilakukan dari browser (client-side) di hooks/useBridge.ts
+ * karena Vercel serverless IP diblokir Circle Iris (403 "Host not in allowlist").
  *
- * Set IRIS_API_URL di env untuk override jika domain diblokir di hosting.
- * Default: https://iris-api-sandbox.circle.com (testnet)
+ * Browser tidak kena IP restriction — Iris support CORS untuk browser.
  *
  * Diagnosa: GET /api/bridge/attestation?test=1
  */
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-// Override via IRIS_API_URL env jika Vercel tidak bisa reach domain default
 const IRIS = (process.env.IRIS_API_URL ?? 'https://iris-api-sandbox.circle.com').replace(/\/$/, '')
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: {
-      'content-type': 'application/json',
-      'Access-Control-Allow-Origin': '*',
-    },
+    headers: { 'content-type': 'application/json', 'Access-Control-Allow-Origin': '*' },
   })
 }
 
-/** Single fetch ke Iris dengan timeout 10s (per Circle recommendation) */
 async function irisGet(url: string): Promise<Response> {
   return fetch(url, {
     headers: { Accept: 'application/json' },
@@ -36,39 +29,29 @@ async function irisGet(url: string): Promise<Response> {
   })
 }
 
-/** Fetch dengan retry + exponential backoff: 2s → 2.6s → ... max 15s
- *  Untuk Arc source (domain 26): lebih agresif karena finality instan
- */
-async function fetchWithRetry(url: string, maxRetries = 4, isArcSource = false): Promise<Response> {
-  const BASE = isArcSource ? 1_500 : 2_000
-  const MAX  = isArcSource ? 8_000 : 15_000
+async function fetchWithRetry(url: string, maxRetries = 3): Promise<Response> {
   let lastErr: unknown
   for (let i = 0; i < maxRetries; i++) {
     try {
       const res = await irisGet(url)
-      // 404 = belum ada di Iris (normal) — bukan error fatal
       if (res.ok || res.status === 404) return res
-      // 5xx → retry
       if (res.status >= 500 && i < maxRetries - 1) {
-        await new Promise(r => setTimeout(r, Math.min(BASE * Math.pow(1.3, i), MAX)))
+        await new Promise(r => setTimeout(r, 2000 * Math.pow(1.3, i)))
         continue
       }
       return res
     } catch (e) {
       lastErr = e
-      if (i < maxRetries - 1) {
-        await new Promise(r => setTimeout(r, Math.min(BASE * Math.pow(1.3, i), MAX)))
-      }
+      if (i < maxRetries - 1) await new Promise(r => setTimeout(r, 2000 * Math.pow(1.3, i)))
     }
   }
-  throw lastErr ?? new Error('fetch failed after retries')
+  throw lastErr ?? new Error('fetch failed')
 }
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url)
 
-  // ── Test endpoint: ?test=1 — diagnosa koneksi ke Iris dari Vercel ─────
-  // Akses: https://nexlink-xi.vercel.app/api/bridge/attestation?test=1
+  // ── Endpoint diagnostik ────────────────────────────────────────────────
   if (searchParams.get('test') === '1') {
     try {
       const res = await irisGet(`${IRIS}/v2/attestations/0x${'0'.repeat(64)}`)
@@ -82,68 +65,43 @@ export async function GET(req: Request) {
   const sourceDomain = searchParams.get('sourceDomain')
   const txHash       = searchParams.get('txHash')
 
-  // Arc Testnet domain = 26 — finality instan, Iris bisa lebih cepat respond
-  const isArcSource = sourceDomain === '26'
-
   if (!messageHash || !/^0x[a-fA-F0-9]{64}$/.test(messageHash)) {
-    return json({ ok: false, error: 'messageHash tidak valid (harus 0x + 64 hex chars)' }, 400)
+    return json({ ok: false, error: 'messageHash tidak valid' }, 400)
   }
 
   // ── Strategy 1: /v2/messages/{domain}?transactionHash={txHash} ────────
-  // Lebih reliable — tidak butuh messageHash yang tepat
   if (sourceDomain && txHash) {
     try {
-      const url = `${IRIS}/v2/messages/${sourceDomain}?transactionHash=${txHash}`
-      const res = await fetchWithRetry(url, 4, isArcSource)
-
+      const res = await fetchWithRetry(`${IRIS}/v2/messages/${sourceDomain}?transactionHash=${txHash}`)
       if (res.ok) {
         const data = await res.json() as any
         const msg  = Array.isArray(data?.messages) ? data.messages[0] : null
         if (msg) {
-          const status      = msg.status ?? 'pending_confirmations'
-          const attestation = msg.attestation && msg.attestation !== 'PENDING'
-            ? msg.attestation as string : null
-          if (status === 'complete' && attestation) {
-            return json({ ok: true, status: 'complete', attestation })
-          }
-          return json({ ok: true, status: 'pending_confirmations', attestation: null })
+          const att = msg.attestation && msg.attestation !== 'PENDING' ? msg.attestation as string : null
+          if (msg.status === 'complete' && att) return json({ ok: true, status: 'complete', attestation: att })
+          return json({ ok: true, status: 'pending', attestation: null })
         }
-      } else if (res.status !== 404) {
-        console.warn(`[attestation] /v2/messages HTTP ${res.status}`)
       }
     } catch (e: any) {
-      console.error('[attestation] Iris V2 fetch failed:', e?.message)
-      // Jangan stop — coba strategy 2
+      console.error('[attestation] /v2/messages failed:', e?.message)
     }
   }
 
   // ── Strategy 2: /v2/attestations/{messageHash} ────────────────────────
   try {
-    const url = `${IRIS}/v2/attestations/${messageHash}`
-    const res = await fetchWithRetry(url, 4, isArcSource)
-
+    const res = await fetchWithRetry(`${IRIS}/v2/attestations/${messageHash}`)
     if (res.ok) {
       const data = await res.json() as any
-      const status      = data?.status ?? 'pending_confirmations'
-      const attestation = data?.attestation && data.attestation !== 'PENDING'
-        ? data.attestation as string : null
-      if (status === 'complete' && attestation) {
-        return json({ ok: true, status: 'complete', attestation })
-      }
-      return json({ ok: true, status: 'pending_confirmations', attestation: null })
+      const att  = data?.attestation && data.attestation !== 'PENDING' ? data.attestation as string : null
+      if (data?.status === 'complete' && att) return json({ ok: true, status: 'complete', attestation: att })
+      return json({ ok: true, status: 'pending', attestation: null })
     }
-
-    if (res.status === 404) {
-      return json({ ok: true, status: 'pending_confirmations', attestation: null })
-    }
-
-    const errText = await res.text().catch(() => '')
-    console.error(`[attestation] /v2/attestations HTTP ${res.status}:`, errText.slice(0, 200))
-    return json({ ok: true, status: 'pending_confirmations', attestation: null,
-      hint: `Iris HTTP ${res.status} — polling dilanjutkan` })
+    if (res.status === 404) return json({ ok: true, status: 'pending', attestation: null })
+    console.error(`[attestation] HTTP ${res.status}`)
   } catch (e: any) {
-    console.error('[attestation] Iris V2 fetch failed:', e?.message)
-    return json({ ok: true, status: 'pending_confirmations', attestation: null,
-      hint: `Network error: ${e?.message} — polling dilanjutkan` })
+    console.error('[attestation] fetch failed:', e?.message)
   }
+
+  // Selalu return pending (bukan error) agar client bisa retry
+  return json({ ok: true, status: 'pending', attestation: null })
 }

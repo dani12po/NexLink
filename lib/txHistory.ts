@@ -1,50 +1,47 @@
 /**
  * lib/txHistory.ts
- * Client-side transaction history — stored per wallet address in localStorage
+ * Transaction history utils — disimpan per wallet di localStorage.
  */
 
-export type TxType = 'bridge' | 'swap'
+export type TxType   = 'bridge' | 'swap'
 export type TxStatus = 'pending' | 'success' | 'failed' | 'attestation'
 
 export interface TxRecord {
-  id: string
-  type: TxType
-  status: TxStatus
+  id:        string
+  type:      TxType
+  status:    TxStatus
   timestamp: number
 
   // Bridge fields
-  direction?: 'sepolia-to-arc' | 'arc-to-sepolia'
-  fromChain?: string
-  toChain?: string
-  amountSent?: string
+  direction?:      'sepolia-to-arc' | 'arc-to-sepolia'
+  fromChain?:      string
+  toChain?:        string
+  amountSent?:     string
   amountReceived?: string
-  fee?: string
-  burnTx?: string
-  mintTx?: string
+  fee?:            string
+  burnTx?:         string
+  mintTx?:         string
 
   // Swap fields
-  fromToken?: string
-  toToken?: string
+  fromToken?:  string
+  toToken?:    string
   fromAmount?: string
-  toAmount?: string
-  txHash?: string
+  toAmount?:   string
+  txHash?:     string
 
   // Common
-  wallet?: string
+  wallet?:   string
   errorMsg?: string
 }
 
-const MAX = 50
+const MAX_RECORDS = 50
 
-/** Storage key scoped to a specific wallet address */
 function walletKey(address: string): string {
   return `nexlink_tx_${address.toLowerCase()}`
 }
 
-/** Load history for a specific wallet */
 export function loadHistory(address?: string | null): TxRecord[] {
-  if (typeof window === 'undefined') return []
-  if (!address) return []
+  if (typeof window === 'undefined' || !address) return []
   try {
     return JSON.parse(localStorage.getItem(walletKey(address)) ?? '[]')
   } catch {
@@ -52,27 +49,23 @@ export function loadHistory(address?: string | null): TxRecord[] {
   }
 }
 
-/** Save history for a specific wallet */
 export function saveHistory(address: string, records: TxRecord[]): void {
   if (typeof window === 'undefined') return
-  localStorage.setItem(walletKey(address), JSON.stringify(records.slice(0, MAX)))
+  localStorage.setItem(walletKey(address), JSON.stringify(records.slice(0, MAX_RECORDS)))
 }
 
-/** Add a new tx record for a wallet */
 export function addTx(record: Omit<TxRecord, 'id' | 'timestamp'>): TxRecord {
   const tx: TxRecord = {
     ...record,
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    id:        `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     timestamp: Date.now(),
   }
-  const wallet = record.wallet
-  if (!wallet) return tx
-  const history = loadHistory(wallet)
-  saveHistory(wallet, [tx, ...history])
+  if (!record.wallet) return tx
+  const history = loadHistory(record.wallet)
+  saveHistory(record.wallet, [tx, ...history])
   return tx
 }
 
-/** Update an existing tx record */
 export function updateTx(id: string, patch: Partial<TxRecord>, wallet?: string): void {
   if (!wallet) return
   const history = loadHistory(wallet)
@@ -82,16 +75,16 @@ export function updateTx(id: string, patch: Partial<TxRecord>, wallet?: string):
   saveHistory(wallet, history)
 }
 
-/** Estimate received amount after CCTP forwarding fee
- * maxFee = 0.001 USDC (CCTP_MAX_FEE = 1_000 units)
- * amount harus > maxFee agar depositForBurn tidak revert
+/**
+ * Estimasi USDC yang diterima setelah CCTP fee.
+ * CCTP_MAX_FEE = 0.001 USDC — amount harus > fee ini.
  */
 export function estimateBridgeReceived(amountStr: string): { received: string; fee: string } {
-  const amount = parseFloat(amountStr) || 0
-  const feeFlat = 0.001  // sesuai CCTP_MAX_FEE = 1_000n
-  const received = Math.max(0, amount - feeFlat)
+  const amount  = parseFloat(amountStr) || 0
+  const fee     = 0.001
+  const received = Math.max(0, amount - fee)
   return {
     received: received.toFixed(6),
-    fee: feeFlat.toFixed(6),
+    fee:      fee.toFixed(6),
   }
 }
