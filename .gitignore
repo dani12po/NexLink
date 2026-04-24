@@ -1,0 +1,46 @@
+# --- Environment / secrets ---
+.env
+.env.local
+.env.*.local
+.env.*        # (optional) blocks any other env variants
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+secret/
+private/
+keys/
+**/keys/
+**/secrets/
+
+# --- Node / Next.js ---
+node_modules/
+.next/
+out/
+dist/
+build/
+.vercel/
+.next/cache/
+
+# --- Logs ---
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# --- OS / Editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- Optional: test/artifacts ---
+coverage/
+*.tsbuildinfo
+
+# --- Local analysis / notes ---
+ANALISIS_CODEBASE.md
+PROMPT_MASTER_NEXLINK_REAL_TESTNET.md
+proxy.txt

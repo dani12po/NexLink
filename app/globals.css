@@ -1,0 +1,47 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&display=swap');
+
+:root {
+  color-scheme: dark;
+  --nexlink-teal: #00D4AA;
+  --nexlink-blue: #00A3FF;
+}
+
+body {
+  @apply bg-zinc-950 text-zinc-100;
+  font-family: 'Space Grotesk', sans-serif;
+}
+
+/* Dropdown fade-in + slide-down */
+@keyframes dropdownIn {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Refresh spin animation */
+@keyframes spin-once {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.spin-once {
+  animation: spin-once 0.5s ease-in-out;
+}
+
+/* Nav active underline */
+.nav-active {
+  color: #ffffff;
+  position: relative;
+}
+.nav-active::after {
+  content: '';
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--nexlink-teal);
+  border-radius: 1px;
+}
