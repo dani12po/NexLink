@@ -6,8 +6,9 @@
  */
 
 // ─── Arc Testnet Network ───────────────────────────────────────────────────
-export const ARC_CHAIN_ID     = 1116
-export const ARC_CHAIN_ID_HEX = '0x45c' // 1116 in hex
+// chainId 5042002 — sumber resmi: https://docs.arc.network/arc/references/connect-to-arc
+export const ARC_CHAIN_ID     = 5042002
+export const ARC_CHAIN_ID_HEX = '0x4cef52' // 5042002 in hex
 export const ARC_RPC          = process.env.NEXT_PUBLIC_ARC_RPC_URL ?? 'https://rpc.testnet.arc.network'
 export const ARC_RPC_BACKUP   = 'https://rpc.blockdaemon.testnet.arc.network'
 export const ARC_RPC_BACKUP2  = 'https://rpc.drpc.testnet.arc.network'

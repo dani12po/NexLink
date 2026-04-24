@@ -24,12 +24,13 @@ import { getEvmProvider, NO_WALLET_MSG } from '@/lib/evmProvider'
 import { useBridge, STATUS_MESSAGES } from '@/hooks/useBridge'
 
 /* ── Chain params ─────────────────────────────────────────────────────── */
+// Arc Testnet chainId = 5042002 (0x4cef52)
+// Sumber resmi: https://docs.arc.network/arc/references/connect-to-arc
+// CATATAN: chainId 1116 = Core Blockchain Mainnet (BUKAN Arc)
 const ARC_CHAIN_PARAMS = {
-  chainId: ARC_CHAIN_ID_HEX,
+  chainId: ARC_CHAIN_ID_HEX,          // 0x4cef52 = 5042002
   chainName: 'Arc Testnet',
-  // wallet_addEthereumChain requires decimals: 18 (EIP-3085 spec)
-  // Actual USDC decimals (6) are used in all contract calls
-  nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 18 },
+  nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 6 },
   rpcUrls: [ARC_RPC],
   blockExplorerUrls: [ARC_EXPLORER],
 }
@@ -290,18 +291,34 @@ export default function BridgePanel() {
     return 'idle'
   }
 
-  /** Switch chain — otomatis add Arc Testnet jika belum ada di wallet */
+  /** Switch chain — force add Arc Testnet agar override nama "Core" di OKX/MetaMask */
   async function switchChain(chainIdHex: string, addParams?: object) {
     const eth = getEvmProvider()
     if (!eth) throw new Error(NO_WALLET_MSG)
+
+    // Jika ada addParams (Arc Testnet), selalu coba addEthereumChain dulu
+    // Ini override nama chain yang salah (misal "Core") di database wallet
+    if (addParams) {
+      try {
+        await eth.request({ method: 'wallet_addEthereumChain', params: [addParams] })
+        return // wallet_addEthereumChain otomatis switch juga
+      } catch (addErr: any) {
+        // Beberapa wallet throw jika chain sudah ada — fallback ke switchEthereumChain
+        if (addErr?.code !== 4001) { // 4001 = user rejected
+          try {
+            await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: chainIdHex }] })
+            return
+          } catch { /* ignore */ }
+        }
+        throw addErr
+      }
+    }
+
+    // Untuk chain tanpa addParams (Sepolia), langsung switch
     try {
       await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: chainIdHex }] })
     } catch (e: any) {
-      if (e?.code === 4902 && addParams) {
-        await eth.request({ method: 'wallet_addEthereumChain', params: [addParams] })
-        // Setelah add, switch lagi
-        await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: chainIdHex }] })
-      } else throw e
+      throw e
     }
   }
 
