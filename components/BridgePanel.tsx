@@ -162,12 +162,13 @@ async function pollAttestation(
   burnTxHash: string,
   messageHash: string,
   onProgress: (msg: string) => void,
-  maxPolls = 240
+  maxPolls = 720  // 720 × 5s = 60 menit (1 jam)
 ): Promise<string | null> {
   for (let i = 1; i <= maxPolls; i++) {
     await new Promise(r => setTimeout(r, 5000))
     if (i % 6 === 1) {
-      onProgress(`Menunggu attestation… ${Math.floor(i * 5 / 60)}m berlalu (normal 3–20 menit)`)
+      const elapsed = Math.floor(i * 5 / 60)
+      onProgress(`Menunggu attestation… ${elapsed}m berlalu (bisa sampai 60 menit di testnet)`)
     }
     try {
       // ✅ Server proxy — bypass CORS, retry built-in
@@ -394,7 +395,7 @@ export default function BridgePanel() {
         // ── Step 3: Poll attestation via server proxy ─────────────────
         // FIX BUG #2: gunakan server proxy, bukan langsung ke Iris (CORS)
         const att = await pollAttestation(SEPOLIA_CCTP_DOMAIN, burnHash, msgHashHex, setProgress)
-        if (!att) throw new Error('Attestation timeout (20 menit). USDC sudah di-burn — coba mint manual nanti.')
+        if (!att) throw new Error('Attestation timeout (60 menit). USDC sudah di-burn — coba mint manual nanti.')
 
         if (abortRef.current) throw new Error('Bridge dibatalkan (wallet disconnect)')
 
@@ -494,7 +495,7 @@ export default function BridgePanel() {
         // ── Step 3: Poll attestation via server proxy ─────────────────
         // FIX BUG #2: gunakan server proxy, bukan langsung ke Iris (CORS)
         const att = await pollAttestation(ARC_CCTP_DOMAIN, burnHash, msgHashHex, setProgress)
-        if (!att) throw new Error('Attestation timeout (20 menit). USDC sudah di-burn — coba mint manual nanti.')
+        if (!att) throw new Error('Attestation timeout (60 menit). USDC sudah di-burn — coba mint manual nanti.')
 
         if (abortRef.current) throw new Error('Bridge dibatalkan (wallet disconnect)')
 

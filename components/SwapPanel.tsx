@@ -9,9 +9,9 @@ import React, { useState, useEffect, useCallback } from 'react'
 import { createPublicClient, http, formatUnits, erc20Abi } from 'viem'
 import {
   ARC_CHAIN_ID, ARC_CHAIN_ID_HEX, ARC_RPC, ARC_EXPLORER,
-  ARC_USDC, ARC_EURC, ARC_USYC, ARC_FX_ESCROW, arcTestnet,
+  ARC_USDC, ARC_EURC, ARC_FX_ESCROW, arcTestnet,
 } from '@/lib/arcChain'
-import { SUPPORTED_TOKENS, type TokenSymbol } from '@/lib/swapTokens'
+import { type TokenSymbol } from '@/lib/swapTokens'
 import { useSwapQuote } from '@/lib/useSwapQuote'
 import { useWallet } from './WalletButton'
 import { getEvmProvider, NO_WALLET_MSG } from '@/lib/evmProvider'
@@ -26,8 +26,14 @@ const arcPublicClient = createPublicClient({ chain: arcTestnet as any, transport
 const TOKEN_ADDRESSES: Record<string, `0x${string}`> = {
   USDC: ARC_USDC,
   EURC: ARC_EURC,
-  USYC: ARC_USYC,
+  // USYC tidak didukung App Kit — hanya USDC↔EURC
 }
+
+// Token yang didukung untuk swap (App Kit hanya support USDC↔EURC di Arc Testnet)
+const SWAP_TOKENS = [
+  { symbol: 'USDC' as TokenSymbol, name: 'USD Coin',  logoChar: '$' },
+  { symbol: 'EURC' as TokenSymbol, name: 'Euro Coin', logoChar: '€' },
+]
 
 const ARC_CHAIN_PARAMS = {
   chainId: ARC_CHAIN_ID_HEX,
@@ -94,7 +100,7 @@ export default function SwapPanel() {
     if (!address) return
     try {
       const entries = await Promise.all(
-        SUPPORTED_TOKENS.map(async t => {
+        SWAP_TOKENS.map(async t => {
           const addr = TOKEN_ADDRESSES[t.symbol]
           if (!addr) return [t.symbol, '—'] as const
           const raw = await arcPublicClient.readContract({
@@ -219,8 +225,8 @@ export default function SwapPanel() {
     }
   }
 
-  const fromInfo = SUPPORTED_TOKENS.find(t => t.symbol === fromToken)
-  const toInfo   = SUPPORTED_TOKENS.find(t => t.symbol === toToken)
+  const fromInfo = SWAP_TOKENS.find(t => t.symbol === fromToken)
+  const toInfo   = SWAP_TOKENS.find(t => t.symbol === toToken)
   const amt      = parseFloat(fromAmount) || 0
 
   return (
@@ -462,6 +468,7 @@ export default function SwapPanel() {
           balances={balances}
           onSelect={t => { setFromToken(t); setError(''); setTxHash(''); setToAmount('') }}
           onClose={() => setShowFromSel(false)}
+          tokens={SWAP_TOKENS}
         />
       )}
       {showToSel && (
@@ -471,6 +478,7 @@ export default function SwapPanel() {
           balances={balances}
           onSelect={t => { setToToken(t); setError(''); setTxHash(''); setToAmount('') }}
           onClose={() => setShowToSel(false)}
+          tokens={SWAP_TOKENS}
         />
       )}
     </div>

@@ -7,20 +7,28 @@
 import React, { useState } from 'react'
 import { SUPPORTED_TOKENS, type TokenSymbol } from '@/lib/swapTokens'
 
+interface TokenInfo {
+  symbol: TokenSymbol
+  name: string
+  logoChar: string
+}
+
 interface TokenSelectorProps {
   selected: TokenSymbol
   exclude?: TokenSymbol
   balances?: Record<string, string>
   onSelect: (token: TokenSymbol) => void
   onClose: () => void
+  tokens?: TokenInfo[]  // opsional — default pakai SUPPORTED_TOKENS
 }
 
 export default function TokenSelector({
-  selected, exclude, balances = {}, onSelect, onClose,
+  selected, exclude, balances = {}, onSelect, onClose, tokens,
 }: TokenSelectorProps) {
+  const tokenList = tokens ?? SUPPORTED_TOKENS
   const [search, setSearch] = useState('')
 
-  const filtered = SUPPORTED_TOKENS.filter(t => {
+  const filtered = tokenList.filter(t => {
     if (t.symbol === exclude) return false
     if (!search) return true
     return (
