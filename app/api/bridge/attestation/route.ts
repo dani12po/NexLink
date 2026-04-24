@@ -36,8 +36,13 @@ async function irisGet(url: string): Promise<Response> {
   })
 }
 
-/** Fetch dengan retry + exponential backoff: 2s → 2.6s → ... max 15s */
-async function fetchWithRetry(url: string, maxRetries = 4): Promise<Response> {
+/**
+ * Fetch dengan retry + exponential backoff: 2s → 2.6s → ... max 15s
+ * Untuk Arc source (domain 26): lebih agresif karena finality instan
+ */
+async function fetchWithRetry(url: string, maxRetries = 4, isArcSource = false): Promise<Response> {
+  const BASE = isArcSource ? 1_500 : 2_000
+  const MAX  = isArcSource ? 8_000 : 15_000
   let lastErr: unknown
   for (let i = 0; i < maxRetries; i++) {
     try {
@@ -46,14 +51,14 @@ async function fetchWithRetry(url: string, maxRetries = 4): Promise<Response> {
       if (res.ok || res.status === 404) return res
       // 5xx → retry
       if (res.status >= 500 && i < maxRetries - 1) {
-        await new Promise(r => setTimeout(r, Math.min(2000 * Math.pow(1.3, i), 15_000)))
+        await new Promise(r => setTimeout(r, Math.min(BASE * Math.pow(1.3, i), MAX)))
         continue
       }
       return res
     } catch (e) {
       lastErr = e
       if (i < maxRetries - 1) {
-        await new Promise(r => setTimeout(r, Math.min(2000 * Math.pow(1.3, i), 15_000)))
+        await new Promise(r => setTimeout(r, Math.min(BASE * Math.pow(1.3, i), MAX)))
       }
     }
   }
@@ -78,6 +83,9 @@ export async function GET(req: Request) {
   const sourceDomain = searchParams.get('sourceDomain')
   const txHash       = searchParams.get('txHash')
 
+  // Arc Testnet domain = 26 — finality instan, Iris bisa lebih cepat respond
+  const isArcSource = sourceDomain === '26'
+
   if (!messageHash || !/^0x[a-fA-F0-9]{64}$/.test(messageHash)) {
     return json({ ok: false, error: 'messageHash tidak valid (harus 0x + 64 hex chars)' }, 400)
   }
@@ -87,7 +95,7 @@ export async function GET(req: Request) {
   if (sourceDomain && txHash) {
     try {
       const url = `${IRIS}/v2/messages/${sourceDomain}?transactionHash=${txHash}`
-      const res = await fetchWithRetry(url)
+      const res = await fetchWithRetry(url, 4, isArcSource)
 
       if (res.ok) {
         const data = await res.json() as any
@@ -113,7 +121,7 @@ export async function GET(req: Request) {
   // ── Strategy 2: /v2/attestations/{messageHash} ────────────────────────
   try {
     const url = `${IRIS}/v2/attestations/${messageHash}`
-    const res = await fetchWithRetry(url)
+    const res = await fetchWithRetry(url, 4, isArcSource)
 
     if (res.ok) {
       const data = await res.json() as any
