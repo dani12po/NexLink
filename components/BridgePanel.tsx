@@ -16,7 +16,7 @@ import {
   ARC_USDC, ARC_TOKEN_MESSENGER, ARC_CCTP_DOMAIN,
   SEPOLIA_CHAIN_ID_HEX, SEPOLIA_RPC, SEPOLIA_RPC_BACKUP, SEPOLIA_RPC_FALLBACK3,
   SEPOLIA_USDC, SEPOLIA_TOKEN_MESSENGER, SEPOLIA_MESSAGE_TRANSMITTER, SEPOLIA_CCTP_DOMAIN,
-  SEPOLIA_FAST_FINALITY, arcTestnet,
+  CCTP_FAST_FINALITY, CCTP_MAX_FEE, arcTestnet,
 } from '@/lib/arcChain'
 import { useWallet } from './WalletButton'
 import { addTx, updateTx, estimateBridgeReceived } from '@/lib/txHistory'
@@ -33,8 +33,6 @@ const ARC_CHAIN_PARAMS = {
   rpcUrls: [ARC_RPC],
   blockExplorerUrls: [ARC_EXPLORER],
 }
-
-/** Buat Sepolia public client dengan fallback otomatis ke RPC lain */
 function makeSepoliaPublicClient() {
   return createPublicClient({
     chain: sepolia,
@@ -154,37 +152,44 @@ async function fetchMsgBytesFromRpc(rpcUrl: string, txHash: string, blockNumber:
 }
 
 /**
- * pollAttestation — FIX BUG #2: gunakan server proxy /api/bridge/attestation
- * BUKAN fetch langsung ke Iris (CORS blocked di browser)
+ * pollAttestation — server proxy /api/bridge/attestation
+ * Exponential backoff: mulai 5s, naik 1.3x per retry, max 30s
+ * Max 60 menit total (720 polls × rata-rata ~5s)
  */
 async function pollAttestation(
   sourceDomainId: number,
   burnTxHash: string,
   messageHash: string,
   onProgress: (msg: string) => void,
-  maxPolls = 720  // 720 × 5s = 60 menit (1 jam)
+  maxPolls = 720,
 ): Promise<string | null> {
+  const BASE_DELAY = 5_000
+  const MAX_DELAY  = 30_000
+
   for (let i = 1; i <= maxPolls; i++) {
-    await new Promise(r => setTimeout(r, 5000))
-    if (i % 6 === 1) {
-      const elapsed = Math.floor(i * 5 / 60)
-      onProgress(`Menunggu attestation… ${elapsed}m berlalu (bisa sampai 60 menit di testnet)`)
+    // Exponential backoff: 5s → 6.5s → 8.5s → ... capped 30s
+    const delay = Math.min(BASE_DELAY * Math.pow(1.3, Math.min(i - 1, 10)), MAX_DELAY)
+    await new Promise(r => setTimeout(r, delay))
+
+    const elapsed = Math.floor((i * (BASE_DELAY + MAX_DELAY) / 2) / 60_000)
+    if (i % 4 === 1) {
+      onProgress(`Menunggu attestation… ~${elapsed}m berlalu (bisa 3–20 menit di testnet)`)
     }
+
     try {
-      // ✅ Server proxy — bypass CORS, retry built-in
       const params = new URLSearchParams({
         messageHash,
         sourceDomain: String(sourceDomainId),
         txHash: burnTxHash,
       })
-      const r = await fetch(`/api/bridge/attestation?${params}`)
+      const r = await fetch(`/api/bridge/attestation?${params}`, { cache: 'no-store' })
       if (!r.ok) continue
       const data = await r.json()
       if (data.ok && data.attestation && data.status === 'complete') {
         return data.attestation as string
       }
-      // data.status === 'pending' → lanjut polling
-    } catch { /* network error → retry */ }
+      // status === 'pending_confirmations' → lanjut polling
+    } catch { /* network blip → retry */ }
   }
   return null
 }
@@ -371,7 +376,7 @@ export default function BridgePanel() {
         setStep('burn')
         const burnHash = await (walletClient as any).writeContract({
           address: SEPOLIA_TOKEN_MESSENGER, abi: TOKEN_MESSENGER_ABI, functionName: 'depositForBurn',
-          args: [amountUnits, ARC_CCTP_DOMAIN, addrToBytes32(dest), SEPOLIA_USDC, ZERO_BYTES32, 0n, SEPOLIA_FAST_FINALITY],
+          args: [amountUnits, ARC_CCTP_DOMAIN, addrToBytes32(dest), SEPOLIA_USDC, ZERO_BYTES32, CCTP_MAX_FEE, CCTP_FAST_FINALITY],
           account: currentAddress as `0x${string}`,
         })
         setTxs(t => ({ ...t, burn: burnHash }))
@@ -458,7 +463,7 @@ export default function BridgePanel() {
         setStep('burn')
         const burnHash = await (arcWallet as any).writeContract({
           address: ARC_TOKEN_MESSENGER, abi: TOKEN_MESSENGER_ABI, functionName: 'depositForBurn',
-          args: [amountUnits, SEPOLIA_CCTP_DOMAIN, addrToBytes32(dest), ARC_USDC, ZERO_BYTES32, 0n, 1000],
+          args: [amountUnits, SEPOLIA_CCTP_DOMAIN, addrToBytes32(dest), ARC_USDC, ZERO_BYTES32, CCTP_MAX_FEE, CCTP_FAST_FINALITY],
           account: currentAddress as `0x${string}`,
         })
         setTxs(t => ({ ...t, burn: burnHash }))
