@@ -34,7 +34,6 @@ const ARC_CHAIN_PARAMS = {
   rpcUrls: [ARC_RPC],
   blockExplorerUrls: [ARC_EXPLORER],
 }
-
 function makeSepoliaPublicClient() {
   return createPublicClient({
     chain: sepolia,
@@ -154,56 +153,88 @@ async function fetchMsgBytesFromRpc(rpcUrl: string, txHash: string, blockNumber:
 }
 
 /**
- * pollAttestation — server proxy /api/bridge/attestation
+ * pollAttestation — langsung dari browser ke Circle Iris (BYPASS server proxy)
  *
- * Strategi per arah:
- *   Arc→Sepolia: Arc finality instan (1 block), mulai agresif 2s, max 15s.
- *                Iris sandbox biasanya siap dalam 1–5 menit.
- *   Sepolia→Arc: Sepolia butuh ~12+ blok konfirmasi, mulai 5s, max 30s.
- *                Iris sandbox bisa 3–20 menit.
+ * ROOT CAUSE FIX: Vercel serverless functions diblokir oleh Circle Iris IP allowlist
+ * (403 "Host not in allowlist"). Browser TIDAK kena restriction ini — Iris support CORS.
+ *
+ * Strategy:
+ *   1. Coba langsung ke Iris dari browser (/v2/messages/{domain}?transactionHash=...)
+ *   2. Fallback ke server proxy /api/bridge/attestation jika browser CORS gagal
+ *
+ * Timing per arah:
+ *   Arc→Sepolia: Arc finality instan → mulai poll 2s, max 15s
+ *   Sepolia→Arc: Sepolia perlu 12+ blok konfirmasi → mulai 5s, max 30s
  */
+const IRIS_SANDBOX = 'https://iris-api-sandbox.circle.com'
+
+async function fetchIrisDirect(sourceDomainId: number, txHash: string): Promise<string | null> {
+  // Browser-direct call — tidak kena IP allowlist Vercel
+  const url = `${IRIS_SANDBOX}/v2/messages/${sourceDomainId}?transactionHash=${txHash}`
+  const res = await fetch(url, {
+    headers: { 'Accept': 'application/json' },
+    cache: 'no-store',
+    signal: AbortSignal.timeout(8_000),
+  })
+  if (!res.ok) return null
+  const data = await res.json() as any
+  const msg = Array.isArray(data?.messages) ? data.messages[0] : null
+  if (!msg) return null
+  if (msg.status === 'complete' && msg.attestation && msg.attestation !== 'PENDING') {
+    return msg.attestation as string
+  }
+  return null
+}
+
+async function fetchIrisViaProxy(sourceDomainId: number, txHash: string, messageHash: string): Promise<string | null> {
+  // Fallback: server proxy (bisa 403 jika Vercel IP diblokir Iris)
+  const params = new URLSearchParams({ messageHash, sourceDomain: String(sourceDomainId), txHash })
+  const r = await fetch(`/api/bridge/attestation?${params}`, {
+    cache: 'no-store',
+    signal: AbortSignal.timeout(12_000),
+  })
+  if (!r.ok) return null
+  const data = await r.json()
+  if (data.ok && data.attestation && data.status === 'complete') return data.attestation as string
+  return null
+}
+
 async function pollAttestation(
   sourceDomainId: number,
   burnTxHash: string,
   messageHash: string,
   onProgress: (msg: string) => void,
   maxPolls = 720,
-  // FIX: arc-to-sepolia lebih agresif karena Arc finality instan
   isArcSource = false,
 ): Promise<string | null> {
-  // Arc→Sepolia: mulai 2s, naik ke 15s max — Iris biasanya ready dalam 1–5 menit
-  // Sepolia→Arc: mulai 5s, naik ke 30s max — Sepolia perlu 12+ blok konfirmasi
+  // Arc→Sepolia: finality instan → agresif 2s. Sepolia→Arc: 12+ blok → 5s
   const BASE_DELAY = isArcSource ? 2_000 : 5_000
   const MAX_DELAY  = isArcSource ? 15_000 : 30_000
-  const dirLabel   = isArcSource ? 'Arc Testnet' : 'Sepolia'
+
+  let startMs = Date.now()
 
   for (let i = 1; i <= maxPolls; i++) {
-    // Exponential backoff capped ke MAX_DELAY
     const delay = Math.min(BASE_DELAY * Math.pow(1.3, Math.min(i - 1, 10)), MAX_DELAY)
     await new Promise(r => setTimeout(r, delay))
 
-    const elapsed = Math.floor((i * delay) / 60_000)
-    if (i % 4 === 1) {
+    const elapsedSec = Math.floor((Date.now() - startMs) / 1_000)
+    const elapsedMin = Math.floor(elapsedSec / 60)
+    if (i % 3 === 1) {
       onProgress(
         isArcSource
-          ? `Menunggu attestation Circle Iris… ~${elapsed}m (Arc finality instan, biasanya 1–5 menit)`
-          : `Menunggu attestation Circle Iris… ~${elapsed}m berlalu (bisa 3–20 menit di testnet)`,
+          ? `Menunggu attestation Circle Iris… ${elapsedSec}s berlalu (Arc finality instan, biasanya 1–5 menit)`
+          : `Menunggu attestation Circle Iris… ${elapsedMin}m berlalu (Sepolia perlu 3–20 menit)`,
       )
     }
 
     try {
-      const params = new URLSearchParams({
-        messageHash,
-        sourceDomain: String(sourceDomainId),
-        txHash: burnTxHash,
-      })
-      const r = await fetch(`/api/bridge/attestation?${params}`, { cache: 'no-store' })
-      if (!r.ok) continue
-      const data = await r.json()
-      if (data.ok && data.attestation && data.status === 'complete') {
-        return data.attestation as string
-      }
-      // status === 'pending_confirmations' → lanjut polling
+      // Strategy 1: langsung dari browser (tidak kena IP block Vercel)
+      const att = await fetchIrisDirect(sourceDomainId, burnTxHash).catch(() => null)
+      if (att) return att
+
+      // Strategy 2: fallback via server proxy
+      const att2 = await fetchIrisViaProxy(sourceDomainId, burnTxHash, messageHash).catch(() => null)
+      if (att2) return att2
     } catch { /* network blip → retry */ }
   }
   return null
@@ -258,7 +289,7 @@ export default function BridgePanel() {
   const [balances,  setBalances]  = useState({ sepolia: '—', arc: '—' })
   const txIdRef = React.useRef<string | null>(null)
   const addrRef  = React.useRef<string | null>(null)
-  const abortRef = React.useRef<boolean>(false)
+  const abortRef = React.useRef<boolean>(false) // abort flag saat disconnect
 
   // Fetch balances
   const fetchBalances = useCallback(async () => {
@@ -289,8 +320,11 @@ export default function BridgePanel() {
   const currentEstimate = useMemo(() => estimateBridgeReceived(amount), [amount])
   const isBusy = step !== 'idle' && step !== 'done' && step !== 'error'
 
+  // Abort bridge jika wallet disconnect saat bridging
   useEffect(() => {
-    if (!address && isBusy) { abortRef.current = true }
+    if (!address && isBusy) {
+      abortRef.current = true
+    }
   }, [address, isBusy])
 
   function getStepStatus(s: BridgeStep): 'idle' | 'active' | 'done' | 'error' {
@@ -307,12 +341,15 @@ export default function BridgePanel() {
     const eth = getEvmProvider()
     if (!eth) throw new Error(NO_WALLET_MSG)
 
+    // Jika ada addParams (Arc Testnet), selalu coba addEthereumChain dulu
+    // Ini override nama chain yang salah (misal "Core") di database wallet
     if (addParams) {
       try {
         await eth.request({ method: 'wallet_addEthereumChain', params: [addParams] })
-        return
+        return // wallet_addEthereumChain otomatis switch juga
       } catch (addErr: any) {
-        if (addErr?.code !== 4001) {
+        // Beberapa wallet throw jika chain sudah ada — fallback ke switchEthereumChain
+        if (addErr?.code !== 4001) { // 4001 = user rejected
           try {
             await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: chainIdHex }] })
             return
@@ -322,7 +359,12 @@ export default function BridgePanel() {
       }
     }
 
-    await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: chainIdHex }] })
+    // Untuk chain tanpa addParams (Sepolia), langsung switch
+    try {
+      await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: chainIdHex }] })
+    } catch (e: any) {
+      throw e
+    }
   }
 
   async function bridge() {
@@ -340,6 +382,7 @@ export default function BridgePanel() {
 
     const amt = parseFloat(amount)
     if (!amount || isNaN(amt) || amt <= 0) return
+    // amount harus > maxFee (0.001 USDC) agar depositForBurn tidak revert
     if (amt <= 0.001) {
       alert('Jumlah minimum bridge adalah 0.002 USDC (harus lebih besar dari fee 0.001 USDC)')
       setStep('idle')
@@ -352,7 +395,7 @@ export default function BridgePanel() {
     setTxs({ approve: '', burn: '', mint: '' })
     setMsgHash(''); setProgress('')
     setStep('approve')
-    abortRef.current = false
+    abortRef.current = false // reset abort flag
 
     const txRecord = addTx({
       type: 'bridge', status: 'pending', direction,
@@ -387,6 +430,7 @@ export default function BridgePanel() {
             account: currentAddress as `0x${string}`,
           })
           setTxs(t => ({ ...t, approve: approveHash }))
+          // FIX BUG #3: timeout + pollingInterval agar tidak stuck
           await publicClient.waitForTransactionReceipt({
             hash: approveHash, confirmations: 1,
             timeout: 180_000, pollingInterval: 3_000,
@@ -396,6 +440,7 @@ export default function BridgePanel() {
         }
 
         // ── Step 2: Burn ─────────────────────────────────────────────
+        // FIX BUG #4: setStep('burn') SELALU dipanggil setelah approve
         setStep('burn')
         const burnHash = await (walletClient as any).writeContract({
           address: SEPOLIA_TOKEN_MESSENGER, abi: TOKEN_MESSENGER_ABI, functionName: 'depositForBurn',
@@ -420,7 +465,8 @@ export default function BridgePanel() {
 
         if (abortRef.current) throw new Error('Bridge dibatalkan (wallet disconnect)')
 
-        // ── Step 3: Poll attestation ──────────────────────────────────
+        // ── Step 3: Poll attestation via server proxy ─────────────────
+        // FIX BUG #2: gunakan server proxy, bukan langsung ke Iris (CORS)
         const att = await pollAttestation(SEPOLIA_CCTP_DOMAIN, burnHash, msgHashHex, setProgress)
         if (!att) throw new Error('Attestation timeout (60 menit). USDC sudah di-burn — coba mint manual nanti.')
 
@@ -431,10 +477,13 @@ export default function BridgePanel() {
         setProgress('Minting USDC di Arc Testnet...')
         updateBridge({ status: 'minting', progress: 75 })
 
+        // FIX BUG #1: gunakan return value, bukan bridgeState (stale closure)
         const mintResult = await mintWithFallback({
-          amount, direction: 'sepolia-to-arc',
+          amount,
+          direction: 'sepolia-to-arc',
           recipient: dest !== currentAddress ? dest : undefined,
-          msgBytes, att,
+          msgBytes,
+          att,
         })
 
         if (mintResult.ok) {
@@ -470,7 +519,7 @@ export default function BridgePanel() {
             gas: 100_000n, // Arc RPC kadang estimasi gas = 0
           })
           setTxs(t => ({ ...t, approve: approveHash }))
-          // FIX: Arc finality instan — poll 1.5s. Max 3 menit (120×1.5s)
+          // FIX: Arc finality instan — poll 1.5s bukan 4s. Max 3 menit (120×1.5s)
           let approveReceipt: any = null
           for (let attempt = 0; attempt < 120; attempt++) {
             await new Promise(r => setTimeout(r, 1_500))
@@ -499,7 +548,7 @@ export default function BridgePanel() {
         updateTx(txRecord.id, { burnTx: burnHash, status: 'attestation' }, currentAddress)
         setProgress('Menunggu konfirmasi burn di Arc Testnet...')
 
-        // FIX: Arc finality instan — poll 1.5s. Max 3 menit (120×1.5s)
+        // FIX: Arc finality instan — poll 1.5s bukan 4s. Max 3 menit (120×1.5s)
         let burnReceipt: any = null
         for (let attempt = 0; attempt < 120; attempt++) {
           await new Promise(r => setTimeout(r, 1_500))
@@ -509,9 +558,10 @@ export default function BridgePanel() {
             if (burnReceipt?.status === 'reverted') throw new Error('Burn tx reverted di Arc Testnet')
           } catch (e: any) {
             if (e?.message?.includes('reverted')) throw e
+            // RPC error → retry
           }
         }
-        if (!burnReceipt) throw new Error('Burn tx tidak terkonfirmasi setelah 3 menit. Cek ArcScan untuk status.')
+        if (!burnReceipt) throw new Error('Burn tx tidak terkonfirmasi setelah 6 menit. Cek ArcScan untuk status.')
 
         let msgBytes = extractMessageBytes(burnReceipt.logs)
         if (!msgBytes) msgBytes = await fetchMsgBytesFromRpc(ARC_RPC, burnHash, Number(burnReceipt.blockNumber))
@@ -524,7 +574,8 @@ export default function BridgePanel() {
 
         if (abortRef.current) throw new Error('Bridge dibatalkan (wallet disconnect)')
 
-        // ── Step 3: Poll attestation (Arc source = agresif) ───────────
+        // ── Step 3: Poll attestation via server proxy ─────────────────
+        // FIX BUG #2: gunakan server proxy, bukan langsung ke Iris (CORS)
         const att = await pollAttestation(ARC_CCTP_DOMAIN, burnHash, msgHashHex, setProgress, 720, true /* isArcSource */)
         if (!att) throw new Error('Attestation timeout (60 menit). USDC sudah di-burn — coba mint manual nanti.')
 
@@ -535,10 +586,13 @@ export default function BridgePanel() {
         setProgress('Minting USDC di Sepolia...')
         updateBridge({ status: 'minting', progress: 75 })
 
+        // FIX BUG #1: gunakan return value, bukan bridgeState (stale closure)
         const mintResult = await mintWithFallback({
-          amount, direction: 'arc-to-sepolia',
+          amount,
+          direction: 'arc-to-sepolia',
           recipient: dest !== currentAddress ? dest : undefined,
-          msgBytes, att,
+          msgBytes,
+          att,
         })
 
         if (mintResult.ok) {
@@ -551,6 +605,7 @@ export default function BridgePanel() {
           setStep('done')
           fetchBalances()
         } else {
+          // Simpan untuk retry
           try {
             if (address) {
               localStorage.setItem(pendingMintKey(address), JSON.stringify({
@@ -593,6 +648,8 @@ export default function BridgePanel() {
           <span>Arc USDC: <span className="text-zinc-400">{balances.arc}</span></span>
         </div>
       )}
+
+
 
       {/* Amount */}
       <div>

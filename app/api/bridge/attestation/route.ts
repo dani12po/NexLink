@@ -36,9 +36,8 @@ async function irisGet(url: string): Promise<Response> {
   })
 }
 
-/**
- * Fetch dengan retry + exponential backoff: 2s → 2.6s → ... max 15s
- * Untuk Arc source (domain 26): lebih agresif karena finality instan
+/** Fetch dengan retry + exponential backoff: 2s → 2.6s → ... max 15s
+ *  Untuk Arc source (domain 26): lebih agresif karena finality instan
  */
 async function fetchWithRetry(url: string, maxRetries = 4, isArcSource = false): Promise<Response> {
   const BASE = isArcSource ? 1_500 : 2_000
