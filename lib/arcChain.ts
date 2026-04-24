@@ -31,6 +31,16 @@ export const arcTestnet = {
 // ─── Arc Contract Addresses ────────────────────────────────────────────────
 /** USDC native token di Arc — 6 decimals via ERC-20 interface */
 export const ARC_USDC = '0x3600000000000000000000000000000000000000' as const
+/** EURC — euro stablecoin, 6 decimals */
+export const ARC_EURC = '0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a' as const
+/** USYC — yield-bearing token, 6 decimals */
+export const ARC_USYC = '0xe9185F0c5F296Ed1797AaE4238D26CCaBEadb86C' as const
+/** StableFX escrow */
+export const ARC_FX_ESCROW = '0x867650F5eAe8df91445971f14d89fd84F0C9a9f8' as const
+/** Multicall3 */
+export const ARC_MULTICALL3 = '0xcA11bde05977b3631167028862bE2a173976CA11' as const
+/** Permit2 */
+export const ARC_PERMIT2 = '0x000000000022D473030F116dDEE9F6B43aC78BA3' as const
 export const ARC_TOKEN_MESSENGER = (
   process.env.NEXT_PUBLIC_ARC_TOKEN_MESSENGER ?? '0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA'
 ) as `0x${string}`
