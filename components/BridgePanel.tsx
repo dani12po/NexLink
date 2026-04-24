@@ -337,6 +337,12 @@ export default function BridgePanel() {
 
     const amt = parseFloat(amount)
     if (!amount || isNaN(amt) || amt <= 0) return
+    // amount harus > maxFee (0.001 USDC) agar depositForBurn tidak revert
+    if (amt <= 0.001) {
+      alert('Jumlah minimum bridge adalah 0.002 USDC (harus lebih besar dari fee 0.001 USDC)')
+      setStep('idle')
+      return
+    }
     const dest = (recipient.trim() || currentAddress) as `0x${string}`
     if (!/^0x[a-fA-F0-9]{40}$/.test(dest)) return
 
@@ -467,11 +473,19 @@ export default function BridgePanel() {
             account: currentAddress as `0x${string}`,
           })
           setTxs(t => ({ ...t, approve: approveHash }))
-          // Arc Testnet: timeout 5 menit, polling 2 detik
-          await arcPublic.waitForTransactionReceipt({
-            hash: approveHash, confirmations: 1,
-            timeout: 300_000, pollingInterval: 2_000,
-          })
+          // Arc Testnet: manual retry loop — waitForTransactionReceipt tidak reliable di Arc RPC
+          let approveReceipt: any = null
+          for (let attempt = 0; attempt < 60; attempt++) {
+            await new Promise(r => setTimeout(r, 2_000))
+            try {
+              approveReceipt = await arcPublic.getTransactionReceipt({ hash: approveHash })
+              if (approveReceipt?.status === 'success') break
+              if (approveReceipt?.status === 'reverted') throw new Error('Approve tx reverted di Arc Testnet')
+            } catch (e: any) {
+              if (e?.message?.includes('reverted')) throw e
+            }
+          }
+          if (!approveReceipt) throw new Error('Approve tx tidak terkonfirmasi setelah 2 menit di Arc.')
         } else {
           setTxs(t => ({ ...t, approve: 'skipped' }))
         }
@@ -720,6 +734,7 @@ export default function BridgePanel() {
       <div className="text-xs text-zinc-700 space-y-0.5 pt-1">
         <p>• Attestation Circle Iris bisa memakan waktu <b className="text-zinc-600">3–20 menit</b> (normal)</p>
         <p>• Arc Testnet otomatis ditambahkan ke wallet jika belum ada</p>
+        <p>• CCTP fee: <b className="text-zinc-600">0.001 USDC</b> — minimum bridge 0.002 USDC</p>
         <p>• Butuh USDC Sepolia: <a href="https://faucet.circle.com" target="_blank" rel="noreferrer" className="underline hover:text-zinc-500">faucet.circle.com</a></p>
         <p>• Butuh ETH Sepolia untuk gas approve &amp; burn</p>
       </div>

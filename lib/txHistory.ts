@@ -82,10 +82,13 @@ export function updateTx(id: string, patch: Partial<TxRecord>, wallet?: string):
   saveHistory(wallet, history)
 }
 
-/** Estimate received amount after CCTP forwarding fee (~0.1 USDC flat on testnet) */
+/** Estimate received amount after CCTP forwarding fee
+ * maxFee = 0.001 USDC (CCTP_MAX_FEE = 1_000 units)
+ * amount harus > maxFee agar depositForBurn tidak revert
+ */
 export function estimateBridgeReceived(amountStr: string): { received: string; fee: string } {
   const amount = parseFloat(amountStr) || 0
-  const feeFlat = 0.1
+  const feeFlat = 0.001  // sesuai CCTP_MAX_FEE = 1_000n
   const received = Math.max(0, amount - feeFlat)
   return {
     received: received.toFixed(6),

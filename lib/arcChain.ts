@@ -80,10 +80,11 @@ export const SEPOLIA_CCTP_DOMAIN   = 0
 export const CCTP_FAST_FINALITY = 1000
 
 /**
- * maxFee untuk depositForBurn (0.1 USDC = 100_000 units, 6 decimals)
- * Harus > 0 agar Circle Iris mau proses attestation
+ * maxFee untuk depositForBurn (0.001 USDC = 1_000 units, 6 decimals)
+ * PENTING: amount harus > maxFee, jadi jangan set terlalu tinggi.
+ * 0.001 USDC cukup untuk Circle Iris testnet.
  */
-export const CCTP_MAX_FEE = 100_000n
+export const CCTP_MAX_FEE = 1_000n
 
 // ─── Typed viem client helpers ────────────────────────────────────────────
 export function makeArcPublicClient() {
