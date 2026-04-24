@@ -471,12 +471,13 @@ export default function BridgePanel() {
             address: ARC_USDC, abi: erc20Abi, functionName: 'approve',
             args: [ARC_TOKEN_MESSENGER, amountUnits],
             account: currentAddress as `0x${string}`,
+            gas: 100_000n, // Arc RPC kadang estimasi gas = 0
           })
           setTxs(t => ({ ...t, approve: approveHash }))
-          // Arc Testnet: manual retry loop — waitForTransactionReceipt tidak reliable di Arc RPC
+          // Arc Testnet: manual retry 90×4s = 6 menit
           let approveReceipt: any = null
-          for (let attempt = 0; attempt < 60; attempt++) {
-            await new Promise(r => setTimeout(r, 2_000))
+          for (let attempt = 0; attempt < 90; attempt++) {
+            await new Promise(r => setTimeout(r, 4_000))
             try {
               approveReceipt = await arcPublic.getTransactionReceipt({ hash: approveHash })
               if (approveReceipt?.status === 'success') break
@@ -485,7 +486,7 @@ export default function BridgePanel() {
               if (e?.message?.includes('reverted')) throw e
             }
           }
-          if (!approveReceipt) throw new Error('Approve tx tidak terkonfirmasi setelah 2 menit di Arc.')
+          if (!approveReceipt) throw new Error('Approve tx tidak terkonfirmasi setelah 6 menit di Arc.')
         } else {
           setTxs(t => ({ ...t, approve: 'skipped' }))
         }
@@ -496,16 +497,16 @@ export default function BridgePanel() {
           address: ARC_TOKEN_MESSENGER, abi: TOKEN_MESSENGER_ABI, functionName: 'depositForBurn',
           args: [amountUnits, SEPOLIA_CCTP_DOMAIN, addrToBytes32(dest), ARC_USDC, ZERO_BYTES32, CCTP_MAX_FEE, CCTP_FAST_FINALITY],
           account: currentAddress as `0x${string}`,
+          gas: 300_000n, // Arc RPC kadang estimasi gas = 0
         })
         setTxs(t => ({ ...t, burn: burnHash }))
         updateTx(txRecord.id, { burnTx: burnHash, status: 'attestation' }, currentAddress)
         setProgress('Menunggu konfirmasi burn di Arc Testnet...')
 
-        // Arc Testnet: deterministic finality ~0.5s tapi RPC bisa lambat
-        // Retry getTransactionReceipt manual agar tidak timeout
+        // Arc Testnet: manual retry 90×4s = 6 menit
         let burnReceipt: any = null
-        for (let attempt = 0; attempt < 60; attempt++) {
-          await new Promise(r => setTimeout(r, 3_000))
+        for (let attempt = 0; attempt < 90; attempt++) {
+          await new Promise(r => setTimeout(r, 4_000))
           try {
             burnReceipt = await arcPublic.getTransactionReceipt({ hash: burnHash })
             if (burnReceipt?.status === 'success') break
@@ -515,7 +516,7 @@ export default function BridgePanel() {
             // RPC error → retry
           }
         }
-        if (!burnReceipt) throw new Error('Burn tx tidak terkonfirmasi setelah 3 menit. Cek ArcScan untuk status.')
+        if (!burnReceipt) throw new Error('Burn tx tidak terkonfirmasi setelah 6 menit. Cek ArcScan untuk status.')
 
         let msgBytes = extractMessageBytes(burnReceipt.logs)
         if (!msgBytes) msgBytes = await fetchMsgBytesFromRpc(ARC_RPC, burnHash, Number(burnReceipt.blockNumber))

@@ -16,7 +16,7 @@ import { sepolia } from 'viem/chains'
 import { privateKeyToAccount } from 'viem/accounts'
 import {
   SEPOLIA_MESSAGE_TRANSMITTER, SEPOLIA_RPC, SEPOLIA_RPC_BACKUP, SEPOLIA_RPC_FALLBACK3,
-  ARC_MESSAGE_TRANSMITTER, ARC_RPC, arcTestnet,
+  ARC_MESSAGE_TRANSMITTER, ARC_RPC, ARC_RPC_BACKUP, ARC_RPC_BACKUP2, arcTestnet,
 } from '@/lib/arcChain'
 
 const MESSAGE_TRANSMITTER_ABI = [
@@ -132,12 +132,20 @@ export async function POST(req: Request) {
       // ── Mint di Arc ──────────────────────────────────────────────────
       const arcPublic = createPublicClient({
         chain: arcTestnet as any,
-        transport: http(ARC_RPC),
+        transport: fallback([
+          http(ARC_RPC),
+          http(ARC_RPC_BACKUP),
+          http(ARC_RPC_BACKUP2),
+        ]),
       })
       const arcWallet = createWalletClient({
         account,
         chain: arcTestnet as any,
-        transport: http(ARC_RPC),
+        transport: fallback([
+          http(ARC_RPC),
+          http(ARC_RPC_BACKUP),
+          http(ARC_RPC_BACKUP2),
+        ]),
       })
 
       try {
@@ -163,6 +171,7 @@ export async function POST(req: Request) {
           functionName: 'receiveMessage',
           args: [msgBytes as Hex, att as Hex],
           account,
+          gas: 500_000n, // Arc RPC sering return gasEstimate = 0
         })
 
         await arcPublic.waitForTransactionReceipt({ hash, confirmations: 1 })
@@ -179,7 +188,7 @@ export async function POST(req: Request) {
         }
         return NextResponse.json({
           ok: false,
-          error: `Mint di Arc gagal: ${m.slice(0, 300)}`,
+          error: `Mint di Arc gagal (gas issue atau RPC timeout): ${m.slice(0, 300)}`,
         }, { status: 500 })
       }
 
