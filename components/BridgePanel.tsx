@@ -21,6 +21,7 @@ import { useEvmAdapter }   from '@/hooks/useEvmAdapter'
 import { useBridge }       from '@/hooks/useBridge'
 import { useProgress, type BridgeStep } from '@/hooks/useProgress'
 import { useUsdcBalance }  from '@/hooks/useUsdcBalance'
+import { useWallet }       from './WalletButton'
 
 /* ── Types ────────────────────────────────────────────────────────────── */
 interface SupportedChain {
@@ -85,7 +86,12 @@ function StepIndicator({ current }: { current: BridgeStep }) {
 
 /* ── Main Component ───────────────────────────────────────────────────── */
 export default function BridgePanel() {
-  const { evmAdapter, evmAddress } = useEvmAdapter()
+  const { evmAdapter, evmAddress: wagmiAddress } = useEvmAdapter()
+  // Pakai address dari WalletButton (custom hook) sebagai primary
+  // karena wallet connect via window.ethereum, bukan wagmi
+  const { address: walletAddress } = useWallet()
+  const evmAddress = walletAddress || wagmiAddress
+
   const { bridge, retry, estimate, isLoading, error, result, clear } = useBridge()
   const { currentStep, stepLabel, logs, handleEvent, reset: resetProgress } = useProgress()
   const { switchChainAsync } = useSwitchChain()
@@ -169,11 +175,26 @@ export default function BridgePanel() {
 
   /* ── Submit bridge ────────────────────────────────────────────────── */
   async function handleBridge() {
-    if (!evmAdapter) return
+    if (!evmAddress) return
 
     const amt = parseFloat(amount)
     if (!amount || isNaN(amt) || amt <= 0.001) {
       alert('Jumlah minimum bridge adalah 0.002 USDC')
+      return
+    }
+
+    // Jika adapter belum siap (wagmi belum sync), coba buat dari window.ethereum
+    let adapter = evmAdapter
+    if (!adapter) {
+      try {
+        const { createViemAdapterFromProvider } = await import('@circle-fin/adapter-viem-v2')
+        const { getEvmProvider } = await import('@/lib/evmProvider')
+        const provider = getEvmProvider()
+        if (provider) adapter = await createViemAdapterFromProvider({ provider })
+      } catch { /* ignore */ }
+    }
+    if (!adapter) {
+      alert('Wallet adapter tidak siap. Coba refresh halaman.')
       return
     }
 
@@ -194,8 +215,8 @@ export default function BridgePanel() {
           fromChain:        sourceChain,
           toChain:          destinationChain,
           amount,
-          fromAdapter:      evmAdapter,
-          toAdapter:        evmAdapter,  // sama karena EVM-only
+          fromAdapter:      adapter,
+          toAdapter:        adapter,
           recipientAddress: useRecipient && recipient.trim() ? recipient.trim() : undefined,
         },
         { onEvent: handleEvent },
@@ -208,10 +229,20 @@ export default function BridgePanel() {
 
   /* ── Retry ────────────────────────────────────────────────────────── */
   async function handleRetry() {
-    if (!evmAdapter || !result) return
+    if (!result) return
+    let adapter = evmAdapter
+    if (!adapter) {
+      try {
+        const { createViemAdapterFromProvider } = await import('@circle-fin/adapter-viem-v2')
+        const { getEvmProvider } = await import('@/lib/evmProvider')
+        const provider = getEvmProvider()
+        if (provider) adapter = await createViemAdapterFromProvider({ provider })
+      } catch { return }
+    }
+    if (!adapter) return
     resetProgress()
     try {
-      await retry(result, { fromAdapter: evmAdapter, toAdapter: evmAdapter }, { onEvent: handleEvent })
+      await retry(result, { fromAdapter: adapter, toAdapter: adapter }, { onEvent: handleEvent })
       await Promise.all([refreshSrcBalance(), refreshDstBalance()])
     } catch { /* error sudah di-handle */ }
   }
@@ -328,7 +359,7 @@ export default function BridgePanel() {
       {/* Bridge button */}
       <button
         type="button" onClick={handleBridge}
-        disabled={isBusy || !evmAdapter || !amount || parseFloat(amount) <= 0.001}
+        disabled={isBusy || !evmAddress || !amount || parseFloat(amount) <= 0.001}
         className="w-full py-3 rounded-xl border border-emerald-800 bg-emerald-500/10 hover:bg-emerald-500/15 hover:shadow-lg hover:shadow-emerald-500/30 text-sm font-semibold disabled:opacity-50 transition-all"
       >
         {isBusy ? stepLabel : isDone ? '✅ Bridge Selesai' : `Bridge ${amount || '?'} USDC →`}
