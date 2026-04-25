@@ -7,14 +7,13 @@
  * ERC-20 contract calls. The 18 here is only to satisfy wagmi's type constraint.
  */
 import { createConfig, http } from 'wagmi'
-import { sepolia, base } from 'wagmi/chains'
+import { sepolia } from 'wagmi/chains'
 import { ARC_CHAIN_ID, ARC_RPC, ARC_EXPLORER } from './arcChain'
 import { defineChain } from 'viem'
 
 export const arcTestnetChain = defineChain({
   id: ARC_CHAIN_ID,
   name: 'Arc Testnet',
-  // wagmi requires decimals: 18 — actual USDC decimals (6) are used in contract calls
   nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 18 },
   rpcUrls: {
     default: { http: [ARC_RPC] },
@@ -26,10 +25,9 @@ export const arcTestnetChain = defineChain({
 })
 
 export const wagmiConfig = createConfig({
-  chains: [arcTestnetChain, sepolia, base],
+  chains: [arcTestnetChain, sepolia],
   transports: {
-    [ARC_CHAIN_ID]:  http(ARC_RPC),
-    [sepolia.id]:    http('https://ethereum-sepolia-rpc.publicnode.com'),
-    [base.id]:       http(process.env.NEXT_PUBLIC_BASE_RPC_URL || 'https://mainnet.base.org'),
+    [ARC_CHAIN_ID]: http(ARC_RPC),
+    [sepolia.id]:   http('https://ethereum-sepolia-rpc.publicnode.com'),
   },
 })
