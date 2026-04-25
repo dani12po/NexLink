@@ -47,7 +47,9 @@ export function useBridge() {
 
     try {
       const kit     = new BridgeKit()
-      const handler = (payload: Record<string, unknown>) => options?.onEvent?.(payload)
+      // Handler pakai 'as any' karena AllActions<TExtraProviders> tidak bisa
+      // di-infer dari luar — tipe internal BridgeKit tidak di-export
+      const handler = (payload: any) => options?.onEvent?.(payload as Record<string, unknown>)
       kit.on('*', handler)
 
       try {
@@ -97,7 +99,8 @@ export function useBridge() {
 
     try {
       const kit     = new BridgeKit()
-      const handler = (payload: Record<string, unknown>) => options?.onEvent?.(payload)
+      // Handler pakai 'as any' — AllActions type tidak di-export dari BridgeKit
+      const handler = (payload: any) => options?.onEvent?.(payload as Record<string, unknown>)
       kit.on('*', handler)
 
       try {

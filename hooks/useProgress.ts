@@ -52,16 +52,18 @@ export function useProgress() {
 
   /**
    * Handle event dari BridgeKit.
+   * Pakai 'any' karena AllActions type tidak di-export dari @circle-fin/bridge-kit.
    * Dipanggil via onEvent callback di useBridge.bridge().
    */
-  const handleEvent = useCallback((evt: Record<string, unknown>) => {
-    const method = evt.method as string
-    const values = (evt.values ?? {}) as Record<string, unknown>
-    const state  = values.state as string
+  const handleEvent = useCallback((evt: any) => {
+    const method = evt?.method as string | undefined
+    const values = (evt?.values ?? {}) as Record<string, unknown>
+    const state  = values.state as string | undefined
     const txHash = values.txHash as string | undefined
     const error  = values.error as string | undefined
 
-    // Mapping event → step
+    if (!method || !state) return
+
     if (method === 'approve') {
       if (state === 'pending') {
         setCurrentStep('approving')
