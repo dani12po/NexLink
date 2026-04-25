@@ -15,19 +15,21 @@ import {
 } from 'viem'
 import { sepolia } from 'viem/chains'
 import {
-  ARC_CHAIN_ID_HEX, ARC_RPC, ARC_RPC_BACKUP, ARC_RPC_BACKUP2,
+  ARC_CHAIN_ID, ARC_CHAIN_ID_HEX, ARC_RPC, ARC_RPC_BACKUP, ARC_RPC_BACKUP2,
   ARC_USDC, ARC_TOKEN_MESSENGER, ARC_CCTP_DOMAIN,
-  SEPOLIA_CHAIN_ID_HEX, SEPOLIA_RPC, SEPOLIA_RPC_BACKUP, SEPOLIA_RPC_FALLBACK3,
+  SEPOLIA_CHAIN_ID, SEPOLIA_CHAIN_ID_HEX, SEPOLIA_RPC, SEPOLIA_RPC_BACKUP, SEPOLIA_RPC_FALLBACK3,
   SEPOLIA_USDC, SEPOLIA_TOKEN_MESSENGER, SEPOLIA_CCTP_DOMAIN,
   CCTP_FAST_FINALITY, CCTP_MAX_FEE, IRIS_API, arcTestnet,
   ARC_EXPLORER, BRIDGE_KIT_CHAIN_ARC, BRIDGE_KIT_CHAIN_SEPOLIA,
 } from '@/lib/arcChain'
 import { addTx, updateTx } from '@/lib/txHistory'
 import { getEvmProvider } from '@/lib/evmProvider'
+import { bsPollTxConfirmed, bsGetGasPrice } from '@/lib/blockscout'
 
 // ─── Chain Config ──────────────────────────────────────────────────────────
 // Semua perbedaan antar chain ada di sini — flow tidak perlu tahu arah
 interface ChainCfg {
+  chainId:       number
   chainIdHex:    string
   viemChain:     any
   rpcUrls:       string[]
@@ -46,6 +48,7 @@ interface ChainCfg {
 
 const CHAIN_CFG: Record<string, ChainCfg> = {
   [BRIDGE_KIT_CHAIN_ARC]: {
+    chainId:        ARC_CHAIN_ID,
     chainIdHex:     ARC_CHAIN_ID_HEX,
     viemChain:      arcTestnet as any,
     rpcUrls:        [ARC_RPC, ARC_RPC_BACKUP, ARC_RPC_BACKUP2],
@@ -65,6 +68,7 @@ const CHAIN_CFG: Record<string, ChainCfg> = {
     },
   },
   [BRIDGE_KIT_CHAIN_SEPOLIA]: {
+    chainId:        SEPOLIA_CHAIN_ID,
     chainIdHex:     SEPOLIA_CHAIN_ID_HEX,
     viemChain:      sepolia,
     rpcUrls:        [SEPOLIA_RPC, SEPOLIA_RPC_BACKUP, SEPOLIA_RPC_FALLBACK3],
@@ -149,84 +153,34 @@ async function fetchMsgBytesFromRpc(rpcUrl: string, txHash: string, blockNumber:
 }
 
 /**
- * Tunggu receipt dengan manual polling.
- * Cek dulu apakah tx ada di mempool (pending) atau tidak ada sama sekali.
- * Arc Testnet kadang membutuhkan waktu lama untuk mine tx dari mempool.
- */
-async function waitReceiptManual(client: any, hash: Hex, rpcUrls: string[], intervalMs = 2_000, maxMs = 1_200_000): Promise<any> {
-  const deadline = Date.now() + maxMs // 20 menit
-  let attempt = 0
-  let lastPendingLog = 0
-
-  while (Date.now() < deadline) {
-    await sleep(intervalMs)
-    const rpcIdx = Math.floor(attempt / 5) % rpcUrls.length
-
-    // Coba via viem client dulu
-    try {
-      const r = await client.getTransactionReceipt({ hash })
-      if (r?.status === 'success') return r
-      if (r?.status === 'reverted') throw new Error(`Transaksi reverted: ${hash}`)
-    } catch (e: any) {
-      if (e?.message?.includes('reverted')) throw e
-    }
-
-    // Fallback: cek via raw RPC setiap 5 attempt
-    if (attempt % 5 === 4) {
-      try {
-        const rpcUrl = rpcUrls[rpcIdx] ?? rpcUrls[0]
-
-        // Cek receipt dulu
-        const receiptRes = await fetch(rpcUrl, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getTransactionReceipt', params: [hash] }),
-        })
-        const receiptData = await receiptRes.json()
-        const receipt = receiptData?.result
-        if (receipt?.status === '0x1') {
-          return { status: 'success', logs: receipt.logs ?? [], blockNumber: BigInt(parseInt(receipt.blockNumber ?? '0', 16)) }
-        }
-        if (receipt?.status === '0x0') throw new Error(`Transaksi reverted: ${hash}`)
-
-        // Cek apakah tx masih pending di mempool
-        const txRes = await fetch(rpcUrl, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'eth_getTransactionByHash', params: [hash] }),
-        })
-        const txData = await txRes.json()
-        const tx = txData?.result
-        const elapsed = Math.round((Date.now() - (deadline - maxMs)) / 1_000)
-
-        if (tx && tx.blockHash === null) {
-          // Tx ada di mempool tapi belum di-mine — normal di Arc Testnet
-          if (Date.now() - lastPendingLog > 30_000) {
-            lastPendingLog = Date.now()
-            console.log(`[bridge] Tx pending di mempool Arc (${elapsed}s): ${hash}`)
-          }
-        } else if (!tx) {
-          // Tx tidak ada sama sekali — mungkin di-drop
-          // Tunggu dulu sampai attempt ke-20 (40 detik) sebelum declare dropped
-          if (attempt > 20) {
-            throw new Error(`Tx tidak ditemukan di network Arc setelah ${attempt * 2}s. Mungkin di-drop. Hash: ${hash}`)
-          }
-        }
-      } catch (fetchErr: any) {
-        if (fetchErr?.message?.includes('reverted') || fetchErr?.message?.includes('tidak ditemukan')) throw fetchErr
-      }
-    }
-    attempt++
-  }
-  throw new Error(`Timeout menunggu konfirmasi (${Math.round(maxMs / 60_000)} menit). Tx masih pending di mempool Arc. Hash: ${hash}`)
-}
-
-/**
  * Tunggu receipt — pilih metode berdasarkan config chain.
- * manualPoll=true: manual polling (Arc)
- * manualPoll=false: waitForTransactionReceipt viem (Sepolia)
+ * Arc: pakai Blockscout API (lebih reliable dari RPC polling)
+ * Sepolia: pakai waitForTransactionReceipt viem
  */
-async function waitReceipt(client: any, hash: Hex, cfg: ChainCfg): Promise<any> {
+async function waitReceipt(
+  client: any,
+  hash: Hex,
+  cfg: ChainCfg,
+  onProgress: (msg: string) => void,
+): Promise<any> {
   if (cfg.manualPoll) {
-    return waitReceiptManual(client, hash, cfg.rpcUrls)
+    // Blockscout polling — deteksi tx status lebih akurat dari RPC
+    const bsResult = await bsPollTxConfirmed(cfg.chainId, hash, onProgress)
+    if (bsResult.status === 'error') {
+      throw new Error(`Transaksi reverted: ${bsResult.error ?? hash}`)
+    }
+    // Ambil receipt dari RPC untuk dapat logs (MessageSent event)
+    try {
+      const receipt = await client.getTransactionReceipt({ hash })
+      if (receipt) return receipt
+    } catch { /* ignore — pakai fallback */ }
+    // Fallback: return minimal receipt dari Blockscout data
+    return {
+      status: 'success',
+      logs: [],
+      blockNumber: BigInt(bsResult.blockNumber ?? 0),
+      transactionHash: hash,
+    }
   }
   return client.waitForTransactionReceipt({
     hash, confirmations: 1, timeout: 180_000, pollingInterval: 3_000,
@@ -346,6 +300,19 @@ export function useBridge() {
         await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: src.chainIdHex }] })
       }
 
+      // ── Fetch gas price dari Blockscout untuk Arc ─────────────────
+      // Lebih akurat dari hardcoded — sesuaikan dengan kondisi network saat ini
+      let arcGasPrice = '0x5E0D4C000' // fallback: 25.2 Gwei
+      if (src.manualPoll) {
+        const gp = await bsGetGasPrice(src.chainId)
+        if (gp?.fast) {
+          // Pakai fast + 10% buffer agar tidak di-drop
+          const fastWei = BigInt(gp.fast)
+          const withBuffer = fastWei + fastWei / 10n
+          arcGasPrice = `0x${withBuffer.toString(16)}`
+        }
+      }
+
       // ── Step 1: Approve ERC-20 standar ────────────────────────────
       onEvent('approve', 'pending')
       const allowance = await srcClient.readContract({
@@ -369,19 +336,18 @@ export function useBridge() {
             from:                 walletAddress,
             to:                   src.usdc,
             data:                 approveData,
-            // Gas eksplisit — Arc RPC sering return estimasi = 0
-            // Gas price 25 Gwei (sedikit di atas current 20 Gwei) agar tidak di-drop
             ...(src.approveGas ? { gas: `0x${src.approveGas.toString(16)}` } : {}),
             ...(src.manualPoll ? {
-              maxFeePerGas:         '0x5E0D4C000', // 25.2 Gwei
-              maxPriorityFeePerGas: '0x5E0D4C000', // 25.2 Gwei
+              maxFeePerGas:         arcGasPrice,
+              maxPriorityFeePerGas: arcGasPrice,
             } : {}),
           }],
         }) as string
 
         // Update UI dengan hash — user bisa cek di explorer sementara menunggu
         onEvent('approve', 'pending', approveTxHash, 'Tx terkirim ke Arc, menunggu konfirmasi…')
-        await waitReceipt(srcClient, approveTxHash as Hex, src)
+        await waitReceipt(srcClient, approveTxHash as Hex, src,
+          (msg) => onEvent('approve', 'pending', approveTxHash, msg))
         onEvent('approve', 'success', approveTxHash)
       } else {
         onEvent('approve', 'success') // allowance sudah cukup
@@ -404,14 +370,15 @@ export function useBridge() {
           data: burnData,
           ...(src.burnGas ? { gas: `0x${src.burnGas.toString(16)}` } : {}),
           ...(src.manualPoll ? {
-            maxFeePerGas:         '0x5E0D4C000', // 25.2 Gwei
-            maxPriorityFeePerGas: '0x5E0D4C000', // 25.2 Gwei
+            maxFeePerGas:         arcGasPrice,
+            maxPriorityFeePerGas: arcGasPrice,
           } : {}),
         }],
       }) as string
 
       updateTx(txRecord.id, { burnTx: burnTxHash, status: 'attestation' }, walletAddress)
-      const burnReceipt = await waitReceipt(srcClient, burnTxHash as Hex, src)
+      const burnReceipt = await waitReceipt(srcClient, burnTxHash as Hex, src,
+        (msg) => onEvent('burn', 'pending', burnTxHash, msg))
 
       // Extract messageBytes dari receipt
       let msgBytes = extractMessageBytes(burnReceipt.logs)
