@@ -301,15 +301,15 @@ export function useBridge() {
       }
 
       // ── Fetch gas price dari Blockscout untuk Arc ─────────────────
-      // Lebih akurat dari hardcoded — sesuaikan dengan kondisi network saat ini
-      let arcGasPrice = '0x5E0D4C000' // fallback: 25.2 Gwei
+      // Arc baseFeePerGas = 20 Gwei — tx dengan 20 Gwei pun confirmed
+      // Jangan override maxFeePerGas — biarkan wallet yang tentukan
+      // Hanya set gasPrice sebagai legacy fallback jika wallet tidak support EIP-1559
+      let arcGasPrice = '0x4A817C800' // 20 Gwei (= baseFeePerGas Arc)
       if (src.manualPoll) {
         const gp = await bsGetGasPrice(src.chainId)
-        if (gp?.fast) {
-          // Pakai fast + 10% buffer agar tidak di-drop
-          const fastWei = BigInt(gp.fast)
-          const withBuffer = fastWei + fastWei / 10n
-          arcGasPrice = `0x${withBuffer.toString(16)}`
+        if (gp?.average) {
+          // Pakai average — tidak perlu buffer besar, Arc tidak congested
+          arcGasPrice = `0x${BigInt(gp.average).toString(16)}`
         }
       }
 
@@ -337,10 +337,8 @@ export function useBridge() {
             to:                   src.usdc,
             data:                 approveData,
             ...(src.approveGas ? { gas: `0x${src.approveGas.toString(16)}` } : {}),
-            ...(src.manualPoll ? {
-              maxFeePerGas:         arcGasPrice,
-              maxPriorityFeePerGas: arcGasPrice,
-            } : {}),
+            // gasPrice sebagai legacy fallback — wallet EIP-1559 akan ignore ini
+            ...(src.manualPoll ? { gasPrice: arcGasPrice } : {}),
           }],
         }) as string
 
@@ -369,10 +367,7 @@ export function useBridge() {
           to:   src.tokenMessenger,
           data: burnData,
           ...(src.burnGas ? { gas: `0x${src.burnGas.toString(16)}` } : {}),
-          ...(src.manualPoll ? {
-            maxFeePerGas:         arcGasPrice,
-            maxPriorityFeePerGas: arcGasPrice,
-          } : {}),
+          ...(src.manualPoll ? { gasPrice: arcGasPrice } : {}),
         }],
       }) as string
 
