@@ -1,11 +1,6 @@
 /**
  * hooks/useProgress.ts
  * Map BridgeKit events ke UI steps dan log timeline.
- * Adaptasi dari sample resmi Circle:
- * https://github.com/circlefin/circle-bridge-kit-transfer/blob/main/src/hooks/useProgress.ts
- *
- * BridgeKit event format:
- * { method: 'approve'|'burn'|'fetchAttestation'|'mint', values: { state, txHash?, error? } }
  */
 'use client'
 
@@ -39,7 +34,7 @@ const STEP_LABELS: Record<BridgeStep, string> = {
 
 export function useProgress() {
   const [currentStep, setCurrentStep] = useState<BridgeStep>('idle')
-  const [logs,        setLogs]        = useState<ProgressLog[]>([])
+  const [logs, setLogs] = useState<ProgressLog[]>([])
 
   const addLog = useCallback((step: BridgeStep, message: string, txHash?: string) => {
     setLogs(prev => [...prev, { timestamp: new Date(), step, message, txHash }])
@@ -50,11 +45,6 @@ export function useProgress() {
     setLogs([])
   }, [])
 
-  /**
-   * Handle event dari BridgeKit.
-   * Pakai 'any' karena AllActions type tidak di-export dari @circle-fin/bridge-kit.
-   * Dipanggil via onEvent callback di useBridge.bridge().
-   */
   const handleEvent = useCallback((evt: any) => {
     const method = evt?.method as string | undefined
     const values = (evt?.values ?? {}) as Record<string, unknown>
@@ -73,7 +63,10 @@ export function useProgress() {
         setCurrentStep('burning')
       } else if (state === 'error') {
         setCurrentStep('error')
-        addLog('error', `Approve gagal: ${error ?? 'unknown'}`)
+        const msg = error?.includes('Timed out') || error?.includes('timeout')
+          ? 'Approve timeout — Arc RPC lambat. Tx mungkin sudah berhasil, cek ArcScan lalu coba lagi.'
+          : `Approve gagal: ${error ?? 'unknown'}`
+        addLog('error', msg)
       }
     } else if (method === 'burn') {
       if (state === 'pending') {

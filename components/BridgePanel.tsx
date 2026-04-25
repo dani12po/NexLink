@@ -92,7 +92,7 @@ export default function BridgePanel() {
   const evmAddress = walletAddress || wagmiAddress
 
   const { bridge, retry, estimate, isLoading, error, result, clear } = useBridge()
-  const { currentStep, stepLabel, logs, handleEvent, reset: resetProgress } = useProgress()
+  const { currentStep, setCurrentStep, stepLabel, logs, handleEvent, reset: resetProgress } = useProgress()
   const { switchChainAsync } = useSwitchChain()
 
   const [sourceChain,      setSourceChain]      = useState<string>(BRIDGE_KIT_CHAIN_SEPOLIA)
@@ -181,6 +181,8 @@ export default function BridgePanel() {
 
     resetProgress()
     clear()
+    // Tampilkan step indicator SEGERA — jangan tunggu event dari BridgeKit
+    setCurrentStep('approving')
 
     try {
       // Switch wallet ke source chain jika perlu
@@ -350,8 +352,8 @@ export default function BridgePanel() {
         <p className="text-center text-xs text-zinc-600">Connect wallet untuk bridge</p>
       )}
 
-      {/* Step indicator — tampil saat bridge berjalan atau selesai */}
-      {currentStep !== 'idle' && (
+      {/* Step indicator — tampil segera saat bridge dimulai */}
+      {(currentStep !== 'idle' || isBusy) && (
         <div className="border border-zinc-800 rounded-xl p-4 bg-zinc-900/30 space-y-4">
           <StepIndicator current={currentStep} />
 
