@@ -151,20 +151,40 @@ async function fetchMsgBytesFromRpc(rpcUrl: string, txHash: string, blockNumber:
 /**
  * Tunggu receipt dengan manual polling.
  * Dipakai untuk chain yang RPC-nya tidak reliable untuk waitForTransactionReceipt.
+ * Coba multiple RPC jika satu gagal.
  */
-async function waitReceiptManual(client: any, hash: Hex, intervalMs = 1_500, maxMs = 180_000): Promise<any> {
+async function waitReceiptManual(client: any, hash: Hex, rpcUrls: string[], intervalMs = 1_500, maxMs = 600_000): Promise<any> {
   const deadline = Date.now() + maxMs
+  let attempt = 0
   while (Date.now() < deadline) {
     await sleep(intervalMs)
+    // Rotasi RPC setiap 10 attempt untuk hindari stuck di satu RPC
+    const rpcIdx = Math.floor(attempt / 10) % rpcUrls.length
     try {
       const r = await client.getTransactionReceipt({ hash })
       if (r?.status === 'success') return r
       if (r?.status === 'reverted') throw new Error(`Transaksi reverted: ${hash}`)
     } catch (e: any) {
       if (e?.message?.includes('reverted')) throw e
+      // RPC error → coba via fetch langsung ke RPC backup
+      if (attempt % 10 === 9 && rpcUrls[rpcIdx]) {
+        try {
+          const res  = await fetch(rpcUrls[rpcIdx], {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getTransactionReceipt', params: [hash] }),
+          })
+          const data = await res.json()
+          const r    = data?.result
+          if (r?.status === '0x1') return { status: 'success', logs: r.logs ?? [], blockNumber: BigInt(r.blockNumber ?? 0) }
+          if (r?.status === '0x0') throw new Error(`Transaksi reverted: ${hash}`)
+        } catch (fetchErr: any) {
+          if (fetchErr?.message?.includes('reverted')) throw fetchErr
+        }
+      }
     }
+    attempt++
   }
-  throw new Error(`Timeout menunggu konfirmasi. Cek explorer untuk status tx: ${hash}`)
+  throw new Error(`Timeout menunggu konfirmasi (${Math.round(maxMs / 60_000)} menit). Cek explorer untuk status tx: ${hash}`)
 }
 
 /**
@@ -174,7 +194,7 @@ async function waitReceiptManual(client: any, hash: Hex, intervalMs = 1_500, max
  */
 async function waitReceipt(client: any, hash: Hex, cfg: ChainCfg): Promise<any> {
   if (cfg.manualPoll) {
-    return waitReceiptManual(client, hash)
+    return waitReceiptManual(client, hash, cfg.rpcUrls)
   }
   return client.waitForTransactionReceipt({
     hash, confirmations: 1, timeout: 180_000, pollingInterval: 3_000,
