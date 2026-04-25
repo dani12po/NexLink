@@ -3,6 +3,7 @@ import { Suspense } from "react";
 import HeaderWallet from "./header-wallet";
 import HeaderTabs from "./header-tabs";
 import { WalletProvider } from "@/lib/walletContext";
+import Providers from "./providers";
 
 export const metadata = {
   title: "NEXLINK",
@@ -58,6 +59,7 @@ export default function RootLayout({ children }) {
     <html lang="en">
       <body className="bg-[#0a0a0a] text-zinc-100">
         <div className="min-h-screen flex flex-col">
+          <Providers>
 
           {/* ── Single header ── */}
           <header
@@ -129,6 +131,7 @@ export default function RootLayout({ children }) {
               Sends testnet USDC on Arc after verified steps. No keys are exposed to the browser. | created with ❤️ by Danixyz
             </div>
           </footer>
+          </Providers>
         </div>
       </body>
     </html>
