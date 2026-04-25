@@ -22,6 +22,8 @@ export interface ProgressLog {
   txHash?:   string
 }
 
+function maskTx(h: string) { return h ? `${h.slice(0, 10)}…${h.slice(-6)}` : '' }
+
 const STEP_LABELS: Record<BridgeStep, string> = {
   'idle':               'Menunggu',
   'approving':          'Menyetujui USDC…',
@@ -57,7 +59,10 @@ export function useProgress() {
     if (method === 'approve') {
       if (state === 'pending') {
         setCurrentStep('approving')
-        addLog('approving', 'Menunggu persetujuan USDC di wallet…')
+        const msg = extra
+          ? `Tx terkirim: ${txHash ? maskTx(txHash) : ''} — ${extra}`
+          : 'Menunggu persetujuan USDC di wallet…'
+        addLog('approving', msg, txHash)
       } else if (state === 'success') {
         addLog('approving', 'USDC disetujui ✅', txHash)
         setCurrentStep('burning')

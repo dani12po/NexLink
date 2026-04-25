@@ -150,41 +150,70 @@ async function fetchMsgBytesFromRpc(rpcUrl: string, txHash: string, blockNumber:
 
 /**
  * Tunggu receipt dengan manual polling.
- * Dipakai untuk chain yang RPC-nya tidak reliable untuk waitForTransactionReceipt.
- * Coba multiple RPC jika satu gagal.
+ * Cek dulu apakah tx ada di mempool (pending) atau tidak ada sama sekali.
+ * Arc Testnet kadang membutuhkan waktu lama untuk mine tx dari mempool.
  */
-async function waitReceiptManual(client: any, hash: Hex, rpcUrls: string[], intervalMs = 1_500, maxMs = 600_000): Promise<any> {
-  const deadline = Date.now() + maxMs
+async function waitReceiptManual(client: any, hash: Hex, rpcUrls: string[], intervalMs = 2_000, maxMs = 1_200_000): Promise<any> {
+  const deadline = Date.now() + maxMs // 20 menit
   let attempt = 0
+  let lastPendingLog = 0
+
   while (Date.now() < deadline) {
     await sleep(intervalMs)
-    // Rotasi RPC setiap 10 attempt untuk hindari stuck di satu RPC
-    const rpcIdx = Math.floor(attempt / 10) % rpcUrls.length
+    const rpcIdx = Math.floor(attempt / 5) % rpcUrls.length
+
+    // Coba via viem client dulu
     try {
       const r = await client.getTransactionReceipt({ hash })
       if (r?.status === 'success') return r
       if (r?.status === 'reverted') throw new Error(`Transaksi reverted: ${hash}`)
     } catch (e: any) {
       if (e?.message?.includes('reverted')) throw e
-      // RPC error → coba via fetch langsung ke RPC backup
-      if (attempt % 10 === 9 && rpcUrls[rpcIdx]) {
-        try {
-          const res  = await fetch(rpcUrls[rpcIdx], {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getTransactionReceipt', params: [hash] }),
-          })
-          const data = await res.json()
-          const r    = data?.result
-          if (r?.status === '0x1') return { status: 'success', logs: r.logs ?? [], blockNumber: BigInt(r.blockNumber ?? 0) }
-          if (r?.status === '0x0') throw new Error(`Transaksi reverted: ${hash}`)
-        } catch (fetchErr: any) {
-          if (fetchErr?.message?.includes('reverted')) throw fetchErr
+    }
+
+    // Fallback: cek via raw RPC setiap 5 attempt
+    if (attempt % 5 === 4) {
+      try {
+        const rpcUrl = rpcUrls[rpcIdx] ?? rpcUrls[0]
+
+        // Cek receipt dulu
+        const receiptRes = await fetch(rpcUrl, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getTransactionReceipt', params: [hash] }),
+        })
+        const receiptData = await receiptRes.json()
+        const receipt = receiptData?.result
+        if (receipt?.status === '0x1') {
+          return { status: 'success', logs: receipt.logs ?? [], blockNumber: BigInt(parseInt(receipt.blockNumber ?? '0', 16)) }
         }
+        if (receipt?.status === '0x0') throw new Error(`Transaksi reverted: ${hash}`)
+
+        // Cek apakah tx masih pending di mempool
+        const txRes = await fetch(rpcUrl, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'eth_getTransactionByHash', params: [hash] }),
+        })
+        const txData = await txRes.json()
+        const tx = txData?.result
+        const elapsed = Math.round((Date.now() - (deadline - maxMs)) / 1_000)
+
+        if (tx && tx.blockHash === null) {
+          // Tx ada di mempool tapi belum di-mine — normal di Arc Testnet
+          if (Date.now() - lastPendingLog > 30_000) {
+            lastPendingLog = Date.now()
+            console.log(`[bridge] Tx pending di mempool Arc (${elapsed}s): ${hash}`)
+          }
+        } else if (!tx) {
+          // Tx tidak ada sama sekali — mungkin di-drop
+          throw new Error(`Tx tidak ditemukan di network Arc. Mungkin di-drop karena gas terlalu rendah. Hash: ${hash}`)
+        }
+      } catch (fetchErr: any) {
+        if (fetchErr?.message?.includes('reverted') || fetchErr?.message?.includes('tidak ditemukan')) throw fetchErr
       }
     }
     attempt++
   }
-  throw new Error(`Timeout menunggu konfirmasi (${Math.round(maxMs / 60_000)} menit). Cek explorer untuk status tx: ${hash}`)
+  throw new Error(`Timeout menunggu konfirmasi (${Math.round(maxMs / 60_000)} menit). Tx masih pending di mempool Arc. Hash: ${hash}`)
 }
 
 /**
@@ -341,13 +370,13 @@ export function useBridge() {
           }],
         }) as string
 
+        // Update UI dengan hash — user bisa cek di explorer sementara menunggu
+        onEvent('approve', 'pending', approveTxHash, 'Tx terkirim ke Arc, menunggu konfirmasi…')
         await waitReceipt(srcClient, approveTxHash as Hex, src)
         onEvent('approve', 'success', approveTxHash)
       } else {
         onEvent('approve', 'success') // allowance sudah cukup
       }
-
-      if (abortCtrl.current.signal.aborted) throw new Error('Bridge dibatalkan')
 
       // ── Step 2: Burn (depositForBurn) ──────────────────────────────
       onEvent('burn', 'pending')
