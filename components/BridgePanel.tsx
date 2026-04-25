@@ -1,354 +1,418 @@
 /**
  * components/BridgePanel.tsx
- * UI Bridge USDC: Ethereum Sepolia ↔ Arc Testnet via Circle CCTP V2.
- * Delegasi semua logic ke useBridge hook — komponen ini hanya UI.
+ * Bridge USDC: Ethereum Sepolia ↔ Arc Testnet via @circle-fin/bridge-kit.
+ *
+ * BridgeKit mengelola seluruh CCTP V2 flow secara internal:
+ * - Approve → Burn → Poll Iris (dari browser, tidak kena IP block) → Mint
+ *
+ * Ref: https://docs.arc.network/app-kit/bridge
+ * Sample: https://github.com/circlefin/circle-bridge-kit-transfer
  */
 'use client'
 
 import React, { useState, useEffect, useCallback } from 'react'
-import { createPublicClient, http, fallback, formatUnits, erc20Abi, parseUnits } from 'viem'
-import { sepolia } from 'viem/chains'
+import { useSwitchChain } from 'wagmi'
+import { BridgeKit } from '@circle-fin/bridge-kit'
 import {
-  ARC_USDC, ARC_EXPLORER, ARC_RPC, ARC_RPC_BACKUP, ARC_RPC_BACKUP2, arcTestnet,
-  SEPOLIA_USDC, SEPOLIA_RPC, SEPOLIA_RPC_BACKUP, SEPOLIA_RPC_FALLBACK3, SEPOLIA_EXPLORER,
+  BRIDGE_KIT_CHAIN_ARC, BRIDGE_KIT_CHAIN_SEPOLIA,
+  ARC_EXPLORER, SEPOLIA_EXPLORER,
 } from '@/lib/arcChain'
-import { estimateBridgeReceived, loadHistory, type TxRecord } from '@/lib/txHistory'
-import { useBridge, type BridgeDirection, fetchCctpFee, fetchFastAllowance, type CctpFeeInfo } from '@/hooks/useBridge'
-import { useWallet } from './WalletButton'
-import { getEvmProvider, NO_WALLET_MSG } from '@/lib/evmProvider'
+import { useEvmAdapter }   from '@/hooks/useEvmAdapter'
+import { useBridge }       from '@/hooks/useBridge'
+import { useProgress, type BridgeStep } from '@/hooks/useProgress'
+import { useUsdcBalance }  from '@/hooks/useUsdcBalance'
+
+/* ── Types ────────────────────────────────────────────────────────────── */
+interface SupportedChain {
+  chain:      string
+  chainId?:   number
+  name:       string
+  isTestnet?: boolean
+}
 
 /* ── Helpers ──────────────────────────────────────────────────────────── */
 function maskTx(h: string) { return h ? `${h.slice(0, 10)}…${h.slice(-8)}` : '' }
 
-function makeSepoliaClient() {
-  return createPublicClient({
-    chain: sepolia,
-    transport: fallback([http(SEPOLIA_RPC), http(SEPOLIA_RPC_BACKUP), http(SEPOLIA_RPC_FALLBACK3)]),
-  })
-}
-function makeArcClient() {
-  return createPublicClient({
-    chain: arcTestnet as any,
-    transport: fallback([http(ARC_RPC), http(ARC_RPC_BACKUP), http(ARC_RPC_BACKUP2)]),
-  }) as any
+function explorerUrl(chain: string, txHash: string): string {
+  if (chain === BRIDGE_KIT_CHAIN_ARC) return `${ARC_EXPLORER}/tx/${txHash}`
+  return `${SEPOLIA_EXPLORER}/tx/${txHash}`
 }
 
-/* ── Sub-components ───────────────────────────────────────────────────── */
-function StepRow({ num, label, status, detail }: {
-  num: number; label: string
-  status: 'idle' | 'active' | 'done' | 'error'; detail?: string
-}) {
-  const icon = status === 'done' ? '✅' : status === 'active' ? '⏳' : status === 'error' ? '❌' : '○'
-  const cls  = status === 'done' ? 'text-emerald-400' : status === 'active' ? 'text-amber-300' : status === 'error' ? 'text-red-400' : 'text-zinc-600'
-  return (
-    <div className={`flex items-start gap-3 py-1.5 ${cls}`}>
-      <span className="w-5 text-center shrink-0 text-sm">{icon}</span>
-      <div className="min-w-0">
-        <div className="text-sm">{num}. {label}</div>
-        {detail && <div className="text-xs opacity-60 mt-0.5 break-all font-mono">{detail}</div>}
-      </div>
-    </div>
-  )
-}
+/* ── Step Indicator ───────────────────────────────────────────────────── */
+const STEPS: { key: BridgeStep; label: string }[] = [
+  { key: 'approving',           label: 'Approve' },
+  { key: 'burning',             label: 'Burn' },
+  { key: 'waiting-attestation', label: 'Attestation' },
+  { key: 'minting',             label: 'Mint' },
+]
 
-function TxHistoryRow({ tx }: { tx: TxRecord }) {
-  const explorer = tx.direction === 'arc-to-sepolia' ? SEPOLIA_EXPLORER : ARC_EXPLORER
-  const statusCls = tx.status === 'success' ? 'text-emerald-400' : tx.status === 'failed' ? 'text-red-400' : 'text-amber-300'
+function StepIndicator({ current }: { current: BridgeStep }) {
+  const order: BridgeStep[] = ['approving', 'burning', 'waiting-attestation', 'minting', 'completed']
+  const curIdx = order.indexOf(current)
+
   return (
-    <div className="flex items-center justify-between py-1.5 text-xs border-b border-zinc-800/50 last:border-0">
-      <div className="flex items-center gap-2 min-w-0">
-        <span className={statusCls}>{tx.status === 'success' ? '✅' : tx.status === 'failed' ? '❌' : '⏳'}</span>
-        <span className="text-zinc-400 truncate">
-          {tx.direction === 'sepolia-to-arc' ? 'Sepolia→Arc' : 'Arc→Sepolia'} {tx.amountSent} USDC
-        </span>
-      </div>
-      {tx.mintTx && (
-        <a href={`${explorer}/tx/${tx.mintTx}`} target="_blank" rel="noreferrer"
-          className="text-sky-500 hover:text-sky-400 shrink-0 ml-2">
-          {maskTx(tx.mintTx)}
-        </a>
-      )}
+    <div className="flex items-center gap-1">
+      {STEPS.map((s, i) => {
+        const idx    = order.indexOf(s.key)
+        const done   = curIdx > idx || current === 'completed'
+        const active = curIdx === idx && current !== 'completed' && current !== 'error'
+        const err    = current === 'error' && curIdx === idx
+
+        return (
+          <React.Fragment key={s.key}>
+            <div className="flex flex-col items-center gap-1">
+              <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold border transition-colors ${
+                done   ? 'bg-emerald-500/20 border-emerald-500 text-emerald-400' :
+                active ? 'bg-amber-500/20 border-amber-500 text-amber-300 animate-pulse' :
+                err    ? 'bg-red-500/20 border-red-500 text-red-400' :
+                         'bg-zinc-900 border-zinc-700 text-zinc-600'
+              }`}>
+                {done ? '✓' : err ? '✗' : i + 1}
+              </div>
+              <span className={`text-xs ${active ? 'text-amber-300' : done ? 'text-emerald-400' : 'text-zinc-600'}`}>
+                {s.label}
+              </span>
+            </div>
+            {i < STEPS.length - 1 && (
+              <div className={`flex-1 h-px mb-5 transition-colors ${done ? 'bg-emerald-500/40' : 'bg-zinc-800'}`} />
+            )}
+          </React.Fragment>
+        )
+      })}
     </div>
   )
 }
 
 /* ── Main Component ───────────────────────────────────────────────────── */
 export default function BridgePanel() {
-  const { address } = useWallet()
-  const { state, executeBridge, reset, retryPendingMint, hasPendingMint } = useBridge()
+  const { evmAdapter, evmAddress } = useEvmAdapter()
+  const { bridge, retry, estimate, isLoading, error, result, clear } = useBridge()
+  const { currentStep, stepLabel, logs, handleEvent, reset: resetProgress } = useProgress()
+  const { switchChainAsync } = useSwitchChain()
 
-  const [direction, setDirection] = useState<BridgeDirection>('sepolia-to-arc')
-  const [amount,    setAmount]    = useState('1')
-  const [recipient, setRecipient] = useState('')
-  const [balances,  setBalances]  = useState({ sepolia: '—', arc: '—' })
-  const [history,   setHistory]   = useState<TxRecord[]>([])
-  const [showHistory, setShowHistory] = useState(false)
-  const [feeInfo,   setFeeInfo]   = useState<CctpFeeInfo | null>(null)
-  const [fastAllowance, setFastAllowance] = useState<string | null>(null)
-  const [feeLoading, setFeeLoading] = useState(false)
+  const [sourceChain,      setSourceChain]      = useState<string>(BRIDGE_KIT_CHAIN_SEPOLIA)
+  const [destinationChain, setDestinationChain] = useState<string>(BRIDGE_KIT_CHAIN_ARC)
+  const [amount,           setAmount]           = useState('')
+  const [recipient,        setRecipient]        = useState('')
+  const [useRecipient,     setUseRecipient]     = useState(false)
+  const [availableChains,  setAvailableChains]  = useState<SupportedChain[]>([])
+  const [feeEstimate,      setFeeEstimate]      = useState<string | null>(null)
+  const [fetchingFee,      setFetchingFee]      = useState(false)
 
-  const isBusy = state.status !== 'idle' && state.status !== 'success' && state.status !== 'error'
-  const srcLabel = direction === 'sepolia-to-arc' ? 'Sepolia' : 'Arc Testnet'
-  const dstLabel = direction === 'sepolia-to-arc' ? 'Arc Testnet' : 'Sepolia'
-  const dstExplorer = direction === 'sepolia-to-arc' ? ARC_EXPLORER : SEPOLIA_EXPLORER
+  // Balance di source chain
+  const { balance: srcBalance, refresh: refreshSrcBalance } = useUsdcBalance(
+    evmAdapter, evmAddress, sourceChain,
+  )
+  // Balance di destination chain
+  const { balance: dstBalance, refresh: refreshDstBalance } = useUsdcBalance(
+    evmAdapter, evmAddress, destinationChain,
+  )
 
-  // Gunakan fee dari Circle API jika tersedia, fallback ke estimasi lokal
-  const feeDisplay = feeInfo
-    ? { fee: feeInfo.feeUsdc, received: (parseFloat(amount || '0') - parseFloat(feeInfo.feeUsdc)).toFixed(6) }
-    : { fee: '0.001000', received: Math.max(0, parseFloat(amount || '0') - 0.001).toFixed(6) }
+  const isBusy = isLoading
+  const isDone = currentStep === 'completed'
+  const isErr  = currentStep === 'error' || !!error
 
-  /* ── Fetch fee dari Circle API ────────────────────────────────────── */
+  /* ── Fetch supported chains dari BridgeKit ────────────────────────── */
   useEffect(() => {
-    const amt = parseFloat(amount)
-    if (!amount || isNaN(amt) || amt <= 0) { setFeeInfo(null); return }
-
-    const src = direction === 'sepolia-to-arc' ? 0 : 26
-    const dst = direction === 'sepolia-to-arc' ? 26 : 0
-
-    setFeeLoading(true)
-    fetchCctpFee(src, dst, parseUnits(amount, 6))
-      .then(f => setFeeInfo(f))
-      .catch(() => setFeeInfo(null))
-      .finally(() => setFeeLoading(false))
-  }, [amount, direction])
-
-  /* ── Fetch fast allowance ─────────────────────────────────────────── */
-  useEffect(() => {
-    fetchFastAllowance().then(a => setFastAllowance(a)).catch(() => {})
+    ;(async () => {
+      try {
+        const kit    = new BridgeKit()
+        const all    = await kit.getSupportedChains() as SupportedChain[]
+        // Filter testnet saja
+        const nets   = all.filter(c => c.isTestnet === true)
+        setAvailableChains(nets.length > 0 ? nets : [
+          { chain: BRIDGE_KIT_CHAIN_SEPOLIA, name: 'Ethereum Sepolia', isTestnet: true },
+          { chain: BRIDGE_KIT_CHAIN_ARC,     name: 'Arc Testnet',      isTestnet: true },
+        ])
+      } catch {
+        // Fallback jika BridgeKit tidak bisa fetch chains
+        setAvailableChains([
+          { chain: BRIDGE_KIT_CHAIN_SEPOLIA, name: 'Ethereum Sepolia', isTestnet: true },
+          { chain: BRIDGE_KIT_CHAIN_ARC,     name: 'Arc Testnet',      isTestnet: true },
+        ])
+      }
+    })()
   }, [])
 
-  /* ── Balances ─────────────────────────────────────────────────────── */
-  const fetchBalances = useCallback(async () => {
-    if (!address) return
-    try {
-      const [sepBal, arcBal] = await Promise.all([
-        makeSepoliaClient().readContract({ address: SEPOLIA_USDC, abi: erc20Abi, functionName: 'balanceOf', args: [address as `0x${string}`] }),
-        makeArcClient().readContract({ address: ARC_USDC, abi: erc20Abi, functionName: 'balanceOf', args: [address as `0x${string}`] }),
-      ])
-      setBalances({
-        sepolia: parseFloat(formatUnits(sepBal as bigint, 6)).toFixed(4),
-        arc:     parseFloat(formatUnits(arcBal as bigint, 6)).toFixed(4),
-      })
-    } catch { /* ignore */ }
-  }, [address])
-
-  useEffect(() => { fetchBalances() }, [fetchBalances])
-  useEffect(() => { const t = setInterval(fetchBalances, 30_000); return () => clearInterval(t) }, [fetchBalances])
-
-  /* ── History ──────────────────────────────────────────────────────── */
+  /* ── Estimasi fee saat amount berubah ─────────────────────────────── */
   useEffect(() => {
-    if (address) setHistory(loadHistory(address).filter(t => t.type === 'bridge').slice(0, 5))
-  }, [address, state.status])
+    const amt = parseFloat(amount)
+    if (!evmAdapter || !amount || isNaN(amt) || amt <= 0) {
+      setFeeEstimate(null)
+      return
+    }
+    const timer = setTimeout(async () => {
+      setFetchingFee(true)
+      try {
+        const est = await estimate({
+          fromChain: sourceChain, toChain: destinationChain,
+          amount, fromAdapter: evmAdapter, toAdapter: evmAdapter,
+        }) as any
+        // est.fee dalam USDC units atau string
+        if (est?.fee) setFeeEstimate(String(est.fee))
+      } catch { setFeeEstimate(null) }
+      finally { setFetchingFee(false) }
+    }, 600) // debounce 600ms
+    return () => clearTimeout(timer)
+  }, [amount, sourceChain, destinationChain, evmAdapter])
 
-  /* ── Step status helper ───────────────────────────────────────────── */
-  function stepStatus(targetStep: number): 'idle' | 'active' | 'done' | 'error' {
-    if (state.status === 'error') return targetStep <= state.step ? 'error' : 'idle'
-    if (state.step > targetStep) return 'done'
-    if (state.step === targetStep && state.status !== 'idle') return 'active'
-    return 'idle'
+  /* ── Flip direction ───────────────────────────────────────────────── */
+  function flipDirection() {
+    if (isBusy) return
+    setSourceChain(destinationChain)
+    setDestinationChain(sourceChain)
+    setAmount('')
+    setFeeEstimate(null)
+    clear()
+    resetProgress()
   }
 
-  /* ── Bridge handler ───────────────────────────────────────────────── */
+  /* ── Submit bridge ────────────────────────────────────────────────── */
   async function handleBridge() {
-    const eth = getEvmProvider()
-    if (!eth) { alert(NO_WALLET_MSG); return }
-
-    let currentAddress = address
-    if (!currentAddress) {
-      try {
-        const accs: string[] = await eth.request({ method: 'eth_requestAccounts' })
-        currentAddress = accs?.[0] ?? null
-        if (!currentAddress) return
-      } catch { return }
-    }
+    if (!evmAdapter) return
 
     const amt = parseFloat(amount)
     if (!amount || isNaN(amt) || amt <= 0.001) {
-      alert('Jumlah minimum bridge adalah 0.002 USDC (fee 0.001 USDC)')
+      alert('Jumlah minimum bridge adalah 0.002 USDC')
       return
     }
-    if (!/^0x[a-fA-F0-9]{40}$/.test(recipient.trim() || currentAddress)) return
 
-    await executeBridge({
-      amount,
-      direction,
-      recipientAddress: recipient.trim() || undefined,
-      walletProvider:   eth,
-      walletAddress:    currentAddress,
-    })
+    resetProgress()
+    clear()
 
-    if (state.status === 'success') fetchBalances()
+    try {
+      // Switch wallet ke source chain jika perlu
+      const srcChainObj = availableChains.find(c => c.chain === sourceChain)
+      if (srcChainObj?.chainId && switchChainAsync) {
+        try {
+          await switchChainAsync({ chainId: srcChainObj.chainId })
+        } catch { /* user mungkin sudah di chain yang benar */ }
+      }
+
+      await bridge(
+        {
+          fromChain:        sourceChain,
+          toChain:          destinationChain,
+          amount,
+          fromAdapter:      evmAdapter,
+          toAdapter:        evmAdapter,  // sama karena EVM-only
+          recipientAddress: useRecipient && recipient.trim() ? recipient.trim() : undefined,
+        },
+        { onEvent: handleEvent },
+      )
+
+      // Refresh balance setelah selesai
+      await Promise.all([refreshSrcBalance(), refreshDstBalance()])
+    } catch { /* error sudah di-handle di useBridge */ }
+  }
+
+  /* ── Retry ────────────────────────────────────────────────────────── */
+  async function handleRetry() {
+    if (!evmAdapter || !result) return
+    resetProgress()
+    try {
+      await retry(result, { fromAdapter: evmAdapter, toAdapter: evmAdapter }, { onEvent: handleEvent })
+      await Promise.all([refreshSrcBalance(), refreshDstBalance()])
+    } catch { /* error sudah di-handle */ }
+  }
+
+  /* ── Chain label helper ───────────────────────────────────────────── */
+  function chainLabel(chain: string): string {
+    return availableChains.find(c => c.chain === chain)?.name ?? chain
   }
 
   /* ── Render ───────────────────────────────────────────────────────── */
   return (
     <div className="space-y-5">
 
-      {/* Direction toggle */}
+      {/* Direction selector */}
       <div className="flex items-center gap-2">
-        <button type="button"
-          onClick={() => { if (!isBusy) { setDirection('sepolia-to-arc'); reset() } }}
-          className={`flex-1 py-2 rounded-lg text-sm font-medium border transition-colors ${
-            direction === 'sepolia-to-arc'
-              ? 'border-emerald-700 bg-emerald-500/10 text-emerald-300'
-              : 'border-zinc-800 text-zinc-500 hover:border-zinc-700'
-          }`}>
-          Sepolia → Arc
-        </button>
-        <button type="button"
-          onClick={() => { if (!isBusy) { setDirection('arc-to-sepolia'); reset() } }}
-          className={`flex-1 py-2 rounded-lg text-sm font-medium border transition-colors ${
-            direction === 'arc-to-sepolia'
-              ? 'border-sky-700 bg-sky-500/10 text-sky-300'
-              : 'border-zinc-800 text-zinc-500 hover:border-zinc-700'
-          }`}>
-          Arc → Sepolia
-        </button>
+        {/* Source chain */}
+        <select
+          value={sourceChain}
+          onChange={e => { if (!isBusy) { setSourceChain(e.target.value); clear(); resetProgress() } }}
+          disabled={isBusy}
+          className="flex-1 px-3 py-2 rounded-xl border border-zinc-800 bg-zinc-900/60 text-sm text-zinc-200 outline-none focus:border-zinc-600 disabled:opacity-50"
+        >
+          {availableChains.filter(c => c.chain !== destinationChain).map(c => (
+            <option key={c.chain} value={c.chain}>{c.name}</option>
+          ))}
+        </select>
+
+        {/* Flip button */}
+        <button
+          type="button" onClick={flipDirection} disabled={isBusy}
+          className="w-9 h-9 rounded-full border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 flex items-center justify-center text-zinc-400 hover:text-zinc-200 transition-all hover:rotate-180 duration-300 disabled:opacity-50"
+          aria-label="Balik arah bridge"
+        >↔</button>
+
+        {/* Destination chain */}
+        <select
+          value={destinationChain}
+          onChange={e => { if (!isBusy) { setDestinationChain(e.target.value); clear(); resetProgress() } }}
+          disabled={isBusy}
+          className="flex-1 px-3 py-2 rounded-xl border border-zinc-800 bg-zinc-900/60 text-sm text-zinc-200 outline-none focus:border-zinc-600 disabled:opacity-50"
+        >
+          {availableChains.filter(c => c.chain !== sourceChain).map(c => (
+            <option key={c.chain} value={c.chain}>{c.name}</option>
+          ))}
+        </select>
       </div>
 
       {/* Balances */}
-      {address && (
+      {evmAddress && (
         <div className="flex items-center justify-between px-1 text-xs text-zinc-600">
-          <span>Sepolia USDC: <span className="text-zinc-400">{balances.sepolia}</span></span>
-          <span>Arc USDC: <span className="text-zinc-400">{balances.arc}</span></span>
+          <span>{chainLabel(sourceChain)}: <span className="text-zinc-400">{srcBalance} USDC</span></span>
+          <span>{chainLabel(destinationChain)}: <span className="text-zinc-400">{dstBalance} USDC</span></span>
         </div>
       )}
 
       {/* Amount */}
       <div>
-        <label className="block text-xs text-zinc-500 mb-1">Jumlah USDC ({srcLabel})</label>
+        <label className="block text-xs text-zinc-500 mb-1">
+          Jumlah USDC ({chainLabel(sourceChain)})
+        </label>
         <input
           type="number" min="0.002" step="0.01" value={amount}
-          onChange={e => setAmount(e.target.value)}
-          disabled={isBusy} placeholder="1"
+          onChange={e => { setAmount(e.target.value); setFeeEstimate(null) }}
+          disabled={isBusy} placeholder="1.00"
           className="w-full px-3 py-2.5 rounded-xl border border-zinc-800 bg-black/30 text-sm outline-none focus:border-zinc-600 disabled:opacity-50"
         />
       </div>
 
-      {/* Fee estimate */}
-      {parseFloat(amount) > 0 && (
+      {/* Fee estimate dari BridgeKit */}
+      {(feeEstimate || fetchingFee) && parseFloat(amount) > 0 && (
         <div className="px-3 py-2.5 rounded-xl border border-zinc-800 bg-zinc-900/20 space-y-1.5 text-xs">
           <div className="flex justify-between text-zinc-500">
             <span>Kamu kirim</span>
             <span className="text-zinc-300 font-medium">{amount} USDC</span>
           </div>
           <div className="flex justify-between text-zinc-500">
-            <span>
-              CCTP fee {feeInfo?.isFast ? <span className="text-sky-500 ml-1">⚡ Fast</span> : ''}
-              {feeLoading && <span className="text-zinc-600 ml-1">…</span>}
+            <span>CCTP fee {fetchingFee && <span className="text-zinc-600">…</span>}</span>
+            <span className="text-red-400">
+              {fetchingFee ? '…' : feeEstimate ? `− ${feeEstimate} USDC` : '—'}
             </span>
-            <span className="text-red-400">− {feeDisplay.fee} USDC</span>
           </div>
-          <div className="border-t border-zinc-800 pt-1.5 flex justify-between">
-            <span className="text-zinc-400">Kamu terima (estimasi)</span>
-            <span className="text-emerald-400 font-semibold">{feeDisplay.received} USDC</span>
-          </div>
-          {fastAllowance && (
-            <div className="flex justify-between text-zinc-600 pt-0.5 border-t border-zinc-800/50">
-              <span>Fast Transfer allowance</span>
-              <span>{parseFloat(fastAllowance).toFixed(2)} USDC</span>
+          {feeEstimate && !fetchingFee && (
+            <div className="border-t border-zinc-800 pt-1.5 flex justify-between">
+              <span className="text-zinc-400">Kamu terima (estimasi)</span>
+              <span className="text-emerald-400 font-semibold">
+                {Math.max(0, parseFloat(amount) - parseFloat(feeEstimate)).toFixed(6)} USDC
+              </span>
             </div>
           )}
         </div>
       )}
 
-      {/* Recipient */}
-      <div>
-        <label className="block text-xs text-zinc-500 mb-1">
-          Recipient di {dstLabel} <span className="text-zinc-700">(kosong = wallet kamu)</span>
+      {/* Optional recipient */}
+      <div className="space-y-2">
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox" checked={useRecipient}
+            onChange={e => setUseRecipient(e.target.checked)}
+            disabled={isBusy}
+            className="rounded border-zinc-700 bg-zinc-900 text-emerald-500"
+          />
+          <span className="text-xs text-zinc-500">Kirim ke alamat berbeda</span>
         </label>
-        <input
-          type="text" value={recipient}
-          onChange={e => setRecipient(e.target.value)}
-          disabled={isBusy} placeholder="0x… (opsional)"
-          className="w-full px-3 py-2.5 rounded-xl border border-zinc-800 bg-black/30 text-sm outline-none focus:border-zinc-600 disabled:opacity-50"
-        />
+        {useRecipient && (
+          <input
+            type="text" value={recipient}
+            onChange={e => setRecipient(e.target.value)}
+            disabled={isBusy} placeholder="0x… recipient address"
+            className="w-full px-3 py-2.5 rounded-xl border border-zinc-800 bg-black/30 text-sm outline-none focus:border-zinc-600 disabled:opacity-50"
+          />
+        )}
       </div>
 
       {/* Bridge button */}
       <button
         type="button" onClick={handleBridge}
-        disabled={isBusy || !address}
+        disabled={isBusy || !evmAdapter || !amount || parseFloat(amount) <= 0.001}
         className="w-full py-3 rounded-xl border border-emerald-800 bg-emerald-500/10 hover:bg-emerald-500/15 hover:shadow-lg hover:shadow-emerald-500/30 text-sm font-semibold disabled:opacity-50 transition-all"
       >
-        {isBusy ? 'Bridging…' : state.status === 'success' ? '✅ Bridge Selesai' : `Bridge ${amount || '?'} USDC →`}
+        {isBusy ? stepLabel : isDone ? '✅ Bridge Selesai' : `Bridge ${amount || '?'} USDC →`}
       </button>
 
-      {!address && <p className="text-center text-xs text-zinc-600">Connect wallet untuk bridge</p>}
-
-      {/* Pending mint recovery */}
-      {address && hasPendingMint(address) && state.status === 'idle' && (
-        <button
-          type="button"
-          onClick={() => retryPendingMint(address)}
-          className="w-full py-2 rounded-lg border border-amber-800 bg-amber-500/10 text-xs font-medium text-amber-300 hover:bg-amber-500/15 transition-colors"
-        >
-          🔄 Ada mint yang belum selesai — klik untuk retry
-        </button>
+      {!evmAddress && (
+        <p className="text-center text-xs text-zinc-600">Connect wallet untuk bridge</p>
       )}
 
-      {/* Progress steps */}
-      {state.status !== 'idle' && (
-        <div className="border border-zinc-800 rounded-xl p-4 bg-zinc-900/30 space-y-0.5">
-          <StepRow num={1} label="Approve USDC"              status={stepStatus(1)} />
-          <StepRow num={2} label={`Burn di ${srcLabel}`}     status={stepStatus(2)} detail={state.burnTxHash ? maskTx(state.burnTxHash) : undefined} />
-          <StepRow num={3} label="Attestation (Circle Iris)" status={stepStatus(3)} />
-          <StepRow num={4} label={`Mint di ${dstLabel}`}     status={stepStatus(4)} detail={state.mintTxHash ? maskTx(state.mintTxHash) : undefined} />
+      {/* Step indicator — tampil saat bridge berjalan atau selesai */}
+      {currentStep !== 'idle' && (
+        <div className="border border-zinc-800 rounded-xl p-4 bg-zinc-900/30 space-y-4">
+          <StepIndicator current={currentStep} />
 
-          {/* Progress message */}
-          {state.progressMsg && state.status !== 'success' && state.status !== 'error' && (
-            <p className="text-xs text-amber-400 mt-2">⏳ {state.progressMsg}</p>
-          )}
-
-          {/* Elapsed time saat attestation */}
-          {state.status === 'awaiting_attestation' && state.elapsedSec > 0 && (
-            <p className="text-xs text-zinc-600 mt-1">{Math.floor(state.elapsedSec / 60)}m {state.elapsedSec % 60}s berlalu</p>
+          {/* Log timeline */}
+          {logs.length > 0 && (
+            <div className="space-y-1.5 max-h-40 overflow-y-auto">
+              {logs.map((log, i) => (
+                <div key={i} className="flex items-start gap-2 text-xs">
+                  <span className="text-zinc-600 shrink-0 font-mono">
+                    {log.timestamp.toLocaleTimeString()}
+                  </span>
+                  <span className={
+                    log.step === 'completed' ? 'text-emerald-400' :
+                    log.step === 'error'     ? 'text-red-400' : 'text-zinc-400'
+                  }>
+                    {log.message}
+                  </span>
+                  {log.txHash && (
+                    <a
+                      href={explorerUrl(sourceChain, log.txHash)}
+                      target="_blank" rel="noreferrer"
+                      className="text-sky-500 hover:text-sky-400 shrink-0 font-mono"
+                    >
+                      {maskTx(log.txHash)}
+                    </a>
+                  )}
+                </div>
+              ))}
+            </div>
           )}
 
           {/* Success */}
-          {state.status === 'success' && (
-            <div className="mt-2 space-y-1">
-              <p className="text-xs text-emerald-400">✅ {state.progressMsg}</p>
-              {state.mintTxHash && (
-                <a href={`${dstExplorer}/tx/${state.mintTxHash}`} target="_blank" rel="noreferrer"
-                  className="block text-xs text-emerald-400 underline hover:text-emerald-300">
-                  Lihat di explorer →
+          {isDone && result && (
+            <div className="space-y-2">
+              <p className="text-xs text-emerald-400 font-medium">✅ Bridge berhasil!</p>
+              {(result as any)?.mintTxHash && (
+                <a
+                  href={explorerUrl(destinationChain, (result as any).mintTxHash)}
+                  target="_blank" rel="noreferrer"
+                  className="block text-xs text-emerald-400 underline hover:text-emerald-300"
+                >
+                  Lihat mint tx di explorer →
                 </a>
               )}
-              <button type="button" onClick={() => { reset(); fetchBalances() }}
-                className="mt-1 text-xs text-zinc-500 hover:text-zinc-400 underline">
+              <button
+                type="button"
+                onClick={() => { clear(); resetProgress(); setAmount('') }}
+                className="text-xs text-zinc-500 hover:text-zinc-400 underline"
+              >
                 Bridge lagi
               </button>
             </div>
           )}
 
-          {/* Error */}
-          {state.status === 'error' && state.error && (
-            <div className="mt-2 space-y-2">
-              <p className="text-xs text-red-400 break-all">❌ {state.error}</p>
-              <button type="button" onClick={reset}
-                className="text-xs text-zinc-500 hover:text-zinc-400 underline">
-                Coba lagi
+          {/* Error + retry */}
+          {isErr && (
+            <div className="space-y-2">
+              <p className="text-xs text-red-400 break-all">❌ {error || 'Bridge gagal'}</p>
+              {result && evmAdapter && (
+                <button
+                  type="button" onClick={handleRetry} disabled={isBusy}
+                  className="w-full py-2 rounded-lg border border-amber-800 bg-amber-500/10 hover:bg-amber-500/15 text-xs font-medium text-amber-300 disabled:opacity-50 transition-colors"
+                >
+                  {isBusy ? '⏳ Mencoba ulang…' : '🔄 Retry Bridge'}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => { clear(); resetProgress() }}
+                className="text-xs text-zinc-500 hover:text-zinc-400 underline"
+              >
+                Mulai ulang
               </button>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Transaction history */}
-      {history.length > 0 && (
-        <div className="border border-zinc-800 rounded-xl overflow-hidden">
-          <button
-            type="button"
-            onClick={() => setShowHistory(v => !v)}
-            className="w-full px-4 py-2.5 flex items-center justify-between text-xs text-zinc-500 hover:text-zinc-400 hover:bg-zinc-900/30 transition-colors"
-          >
-            <span>Riwayat Bridge ({history.length})</span>
-            <span>{showHistory ? '▲' : '▼'}</span>
-          </button>
-          {showHistory && (
-            <div className="px-4 pb-3">
-              {history.map(tx => <TxHistoryRow key={tx.id} tx={tx} />)}
             </div>
           )}
         </div>
@@ -356,10 +420,10 @@ export default function BridgePanel() {
 
       {/* Info */}
       <div className="text-xs text-zinc-700 space-y-0.5 pt-1">
-        <p>• Attestation Circle Iris bisa memakan waktu <b className="text-zinc-600">1–20 menit</b> (normal)</p>
+        <p>• Bridge via Circle BridgeKit — attestation polling dari browser (tidak kena IP block)</p>
+        <p>• Attestation bisa memakan waktu <b className="text-zinc-600">1–20 menit</b> (normal di testnet)</p>
         <p>• Arc Testnet otomatis ditambahkan ke wallet jika belum ada</p>
-        <p>• CCTP fee: <b className="text-zinc-600">0.001 USDC</b> — minimum bridge 0.002 USDC</p>
-        <p>• Butuh USDC Sepolia: <a href="https://faucet.circle.com" target="_blank" rel="noreferrer" className="underline hover:text-zinc-500">faucet.circle.com</a></p>
+        <p>• Butuh USDC: <a href="https://faucet.circle.com" target="_blank" rel="noreferrer" className="underline hover:text-zinc-500">faucet.circle.com</a></p>
         <p>• Butuh ETH Sepolia untuk gas approve &amp; burn</p>
       </div>
     </div>

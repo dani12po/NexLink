@@ -1,7 +1,16 @@
 /**
  * app/api/bridge/mint/route.ts
- * Server-side mint via relayer wallet — bypass wallet restriction (OKX, dll).
- * POST { msgBytes, att, direction }
+ *
+ * CATATAN: Dengan @circle-fin/bridge-kit, server mint route ini mungkin
+ * tidak diperlukan lagi — BridgeKit langsung call receiveMessage dari
+ * browser wallet user.
+ *
+ * File ini dipertahankan sebagai FALLBACK jika BridgeKit membutuhkan
+ * server relayer untuk kasus wallet tertentu yang tidak support sign tx
+ * di destination chain secara langsung.
+ *
+ * Jika BridgeKit handle mint sepenuhnya dari browser, route ini tidak
+ * akan pernah dipanggil.
  */
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'

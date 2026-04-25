@@ -1,13 +1,12 @@
 /**
  * app/api/bridge/attestation/route.ts
  *
- * CATATAN PENTING: Endpoint ini hanya sebagai FALLBACK.
- * Primary attestation polling dilakukan dari browser (client-side) di hooks/useBridge.ts
- * karena Vercel serverless IP diblokir Circle Iris (403 "Host not in allowlist").
+ * DEPRECATED: BridgeKit (@circle-fin/bridge-kit) sekarang poll Circle Iris
+ * langsung dari browser — tidak perlu server proxy lagi.
  *
- * Browser tidak kena IP restriction — Iris support CORS untuk browser.
- *
- * Diagnosa: GET /api/bridge/attestation?test=1
+ * File ini dipertahankan HANYA untuk endpoint diagnostik:
+ * GET /api/bridge/attestation?test=1
+ * → Cek apakah Iris reachable dari Vercel server (biasanya 403 = IP blocked)
  */
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'

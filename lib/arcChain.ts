@@ -6,6 +6,12 @@
 import { createPublicClient, http, fallback } from 'viem'
 import { sepolia } from 'viem/chains'
 
+// ─── BridgeKit Chain Identifiers ───────────────────────────────────────────
+// Format string exact yang dipakai @circle-fin/bridge-kit
+// Ref: https://docs.arc.network/app-kit/bridge
+export const BRIDGE_KIT_CHAIN_ARC     = 'Arc_Testnet'      as const
+export const BRIDGE_KIT_CHAIN_SEPOLIA = 'Ethereum_Sepolia'  as const
+
 // ─── Arc Testnet ───────────────────────────────────────────────────────────
 export const ARC_CHAIN_ID     = 5042002
 export const ARC_CHAIN_ID_HEX = '0x4cef52'
