@@ -1,33 +1,22 @@
 /**
  * lib/wagmiConfig.ts
- * Wagmi config untuk Arc Testnet + Sepolia
+ * Wagmi config — Arc Testnet + Ethereum Sepolia.
  *
- * NOTE: wagmi/viem requires nativeCurrency.decimals = 18 for chain validation.
- * Arc Testnet's USDC is actually 6 decimals — use ARC_USDC (6 dec) for all
- * ERC-20 contract calls. The 18 here is only to satisfy wagmi's type constraint.
+ * TIDAK menggunakan wagmi/connectors karena re-export semua connector
+ * (coinbaseWallet, baseAccount, dll) yang punya optional deps tidak terinstall.
+ *
+ * Wallet connection dihandle oleh WalletButton custom (window.ethereum langsung).
+ * useEvmAdapter fallback ke getEvmProvider() untuk membuat ViemAdapter.
  */
 import { createConfig, http } from 'wagmi'
 import { sepolia } from 'wagmi/chains'
-import { ARC_CHAIN_ID, ARC_RPC, ARC_EXPLORER } from './arcChain'
-import { defineChain } from 'viem'
-
-export const arcTestnetChain = defineChain({
-  id: ARC_CHAIN_ID,
-  name: 'Arc Testnet',
-  nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 18 },
-  rpcUrls: {
-    default: { http: [ARC_RPC] },
-    public:  { http: [ARC_RPC] },
-  },
-  blockExplorers: {
-    default: { name: 'ArcScan', url: ARC_EXPLORER },
-  },
-})
+import { arcTestnet, ARC_RPC, ARC_CHAIN_ID } from './arcChain'
 
 export const wagmiConfig = createConfig({
-  chains: [arcTestnetChain, sepolia],
+  chains:     [arcTestnet, sepolia],
   transports: {
     [ARC_CHAIN_ID]: http(ARC_RPC),
     [sepolia.id]:   http('https://ethereum-sepolia-rpc.publicnode.com'),
   },
+  ssr: true,
 })

@@ -1,6 +1,4 @@
 /** @type {import('next').NextConfig} */
-const nextConfig = {
-  // Keep it simple for Vercel
-};
+const nextConfig = {}
 
-export default nextConfig;
+export default nextConfig

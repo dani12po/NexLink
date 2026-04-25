@@ -1,121 +1,54 @@
 /**
  * hooks/useProgress.ts
- * Map BridgeKit events ke UI steps dan log timeline.
+ * Kelola progress state untuk Bridge UI.
  */
 'use client'
-
 import { useState, useCallback } from 'react'
+import type { BridgeStepEvent } from './useBridge'
 
-export type BridgeStep =
-  | 'idle'
-  | 'approving'
-  | 'burning'
-  | 'waiting-attestation'
-  | 'minting'
-  | 'completed'
-  | 'error'
+export type ProgressStep = 'idle' | 'approving' | 'burning' | 'attesting' | 'minting' | 'done' | 'error'
 
 export interface ProgressLog {
-  timestamp: Date
-  step:      BridgeStep
-  message:   string
-  txHash?:   string
-}
-
-function maskTx(h: string) { return h ? `${h.slice(0, 10)}…${h.slice(-6)}` : '' }
-
-const STEP_LABELS: Record<BridgeStep, string> = {
-  'idle':               'Menunggu',
-  'approving':          'Menyetujui USDC…',
-  'burning':            'Burning USDC di source chain…',
-  'waiting-attestation':'Menunggu attestation Circle Iris…',
-  'minting':            'Minting USDC di destination chain…',
-  'completed':          'Bridge selesai ✅',
-  'error':              'Bridge gagal ❌',
+  step:    string
+  state:   string
+  txHash?: string
+  time:    number
 }
 
 export function useProgress() {
-  const [currentStep, setCurrentStep] = useState<BridgeStep>('idle')
-  const [logs, setLogs] = useState<ProgressLog[]>([])
+  const [step,   setStep]   = useState<ProgressStep>('idle')
+  const [logs,   setLogs]   = useState<ProgressLog[]>([])
+  const [errMsg, setErrMsg] = useState<string | null>(null)
 
-  const addLog = useCallback((step: BridgeStep, message: string, txHash?: string) => {
-    setLogs(prev => [...prev, { timestamp: new Date(), step, message, txHash }])
-  }, [])
-
-  const reset = useCallback(() => {
-    setCurrentStep('idle')
-    setLogs([])
-  }, [])
-
-  const handleEvent = useCallback((evt: any) => {
-    const method = evt?.method as string | undefined
-    const values = (evt?.values ?? {}) as Record<string, unknown>
-    const state  = values.state as string | undefined
-    const txHash = values.txHash as string | undefined
-    const error  = values.error as string | undefined
-
-    if (!method || !state) return
-
-    if (method === 'approve') {
-      if (state === 'pending') {
-        setCurrentStep('approving')
-        const msg = (error || txHash)
-          ? `Tx terkirim: ${txHash ? maskTx(txHash) : ''} — menunggu konfirmasi Arc…`
-          : 'Menunggu persetujuan USDC di wallet…'
-        addLog('approving', msg, txHash)
-      } else if (state === 'success') {
-        addLog('approving', 'USDC disetujui ✅', txHash)
-        setCurrentStep('burning')
-      } else if (state === 'error') {
-        setCurrentStep('error')
-        const msg = error?.includes('Timed out') || error?.includes('timeout')
-          ? 'Approve timeout — Arc RPC lambat. Tx mungkin sudah berhasil, cek ArcScan lalu coba lagi.'
-          : `Approve gagal: ${error ?? 'unknown'}`
-        addLog('error', msg)
+  const handleStepEvent = useCallback((evt: BridgeStepEvent) => {
+    if (evt.state === 'pending') {
+      const map: Record<string, ProgressStep> = {
+        approve:          'approving',
+        burn:             'burning',
+        fetchAttestation: 'attesting',
+        mint:             'minting',
       }
-    } else if (method === 'burn') {
-      if (state === 'pending') {
-        setCurrentStep('burning')
-        addLog('burning', 'Mengirim USDC ke bridge (depositForBurn)…')
-      } else if (state === 'success') {
-        addLog('burning', 'USDC berhasil di-burn ✅', txHash)
-        setCurrentStep('waiting-attestation')
-      } else if (state === 'error') {
-        setCurrentStep('error')
-        addLog('error', `Burn gagal: ${error ?? 'unknown'}`)
-      }
-    } else if (method === 'fetchAttestation') {
-      if (state === 'pending') {
-        setCurrentStep('waiting-attestation')
-        addLog('waiting-attestation', 'Menunggu attestation dari Circle Iris… (1–20 menit)')
-      } else if (state === 'success') {
-        addLog('waiting-attestation', 'Attestation diterima ✅')
-        setCurrentStep('minting')
-      } else if (state === 'error') {
-        setCurrentStep('error')
-        addLog('error', `Attestation gagal: ${error ?? 'unknown'}`)
-      }
-    } else if (method === 'mint') {
-      if (state === 'pending') {
-        setCurrentStep('minting')
-        addLog('minting', 'Minting USDC di destination chain…')
-      } else if (state === 'success') {
-        addLog('minting', 'USDC berhasil di-mint ✅', txHash)
-        setCurrentStep('completed')
-      } else if (state === 'error') {
-        setCurrentStep('error')
-        addLog('error', `Mint gagal: ${error ?? 'unknown'}`)
-      }
+      setStep(map[evt.name] ?? 'idle')
     }
-  }, [addLog])
+    if (evt.state === 'success' && evt.name === 'mint') setStep('done')
+    if (evt.state === 'error') { setStep('error'); setErrMsg(evt.error ?? null) }
 
-  return {
-    currentStep,
-    setCurrentStep,
-    stepLabel: STEP_LABELS[currentStep],
-    logs,
-    addLog,
-    handleEvent,
-    reset,
+    setLogs(prev => [...prev, { step: evt.name, state: evt.state, txHash: evt.txHash, time: Date.now() }])
+  }, [])
+
+  function reset() {
+    setStep('idle'); setLogs([]); setErrMsg(null)
   }
+
+  const STEP_LABELS: Record<ProgressStep, string> = {
+    idle:      'Menunggu',
+    approving: 'Approve USDC…',
+    burning:   'Burn di source chain…',
+    attesting: 'Menunggu attestation Circle…',
+    minting:   'Mint di destination chain…',
+    done:      'Bridge selesai!',
+    error:     'Terjadi kesalahan',
+  }
+
+  return { step, stepLabel: STEP_LABELS[step], logs, errMsg, handleStepEvent, reset }
 }

@@ -2,8 +2,9 @@ import "./globals.css";
 import { Suspense } from "react";
 import HeaderWallet from "./header-wallet";
 import HeaderTabs from "./header-tabs";
-import { WalletProvider } from "@/lib/walletContext";
 import Providers from "./providers";
+import BalanceBar from "@/components/BalanceBar";
+import WalletButton from "@/components/WalletButton";
 
 export const metadata = {
   title: "NEXLINK",
@@ -115,11 +116,14 @@ export default function RootLayout({ children }) {
             </div>
           </header>
 
+          <BalanceBar />
+
+          {/* WalletButton — invisible, hanya untuk render picker modal */}
+          <WalletButton />
+
           <main className="flex-1">
             <div className="mx-auto max-w-6xl px-4 py-10">
-              <WalletProvider>
-                {children}
-              </WalletProvider>
+              {children}
             </div>
           </main>
 

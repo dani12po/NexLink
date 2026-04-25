@@ -1,10 +1,11 @@
 /**
  * lib/txHistory.ts
- * Transaction history utils — disimpan per wallet di localStorage.
+ * Transaction history — disimpan per wallet di localStorage.
+ * Key prefix v2 untuk clear data lama yang tidak kompatibel.
  */
 
-export type TxType   = 'bridge' | 'swap'
-export type TxStatus = 'pending' | 'success' | 'failed' | 'attestation'
+export type TxType   = 'bridge' | 'swap' | 'send'
+export type TxStatus = 'pending' | 'success' | 'failed'
 
 export interface TxRecord {
   id:        string
@@ -12,38 +13,47 @@ export interface TxRecord {
   status:    TxStatus
   timestamp: number
 
-  // Bridge fields
-  direction?:      'sepolia-to-arc' | 'arc-to-sepolia'
-  fromChain?:      string
-  toChain?:        string
-  amountSent?:     string
-  amountReceived?: string
-  fee?:            string
-  burnTx?:         string
-  mintTx?:         string
+  // Bridge
+  direction?:  'sepolia-to-arc' | 'arc-to-sepolia'
+  fromChain?:  string
+  toChain?:    string
+  burnTx?:     string
+  mintTx?:     string
+  amountSent?: string
 
-  // Swap fields
+  // Swap
   fromToken?:  string
   toToken?:    string
   fromAmount?: string
   toAmount?:   string
-  txHash?:     string
 
   // Common
-  wallet?:   string
-  errorMsg?: string
+  txHash?:      string
+  explorerUrl?: string
+  wallet?:      string
+  errorMsg?:    string
 }
 
-const MAX_RECORDS = 50
+// ─── Key v2 — otomatis invalidate data lama ───────────────────────────────────
+const V2_KEY_PREFIX = 'arcdapp_v2_tx_'
+const MAX_STORED    = 100
+export const PAGE_SIZE = 10
 
-function walletKey(address: string): string {
-  return `nexlink_tx_${address.toLowerCase()}`
+function storageKey(address: string) {
+  return `${V2_KEY_PREFIX}${address.toLowerCase()}`
+}
+
+function clearLegacyData(address: string) {
+  if (typeof window === 'undefined') return
+  const oldKey = `nexlink_tx_${address.toLowerCase()}`
+  if (localStorage.getItem(oldKey) !== null) localStorage.removeItem(oldKey)
 }
 
 export function loadHistory(address?: string | null): TxRecord[] {
   if (typeof window === 'undefined' || !address) return []
+  clearLegacyData(address)
   try {
-    return JSON.parse(localStorage.getItem(walletKey(address)) ?? '[]')
+    return JSON.parse(localStorage.getItem(storageKey(address)) ?? '[]')
   } catch {
     return []
   }
@@ -51,13 +61,13 @@ export function loadHistory(address?: string | null): TxRecord[] {
 
 export function saveHistory(address: string, records: TxRecord[]): void {
   if (typeof window === 'undefined') return
-  localStorage.setItem(walletKey(address), JSON.stringify(records.slice(0, MAX_RECORDS)))
+  localStorage.setItem(storageKey(address), JSON.stringify(records.slice(0, MAX_STORED)))
 }
 
 export function addTx(record: Omit<TxRecord, 'id' | 'timestamp'>): TxRecord {
   const tx: TxRecord = {
     ...record,
-    id:        `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    id:        `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     timestamp: Date.now(),
   }
   if (!record.wallet) return tx
@@ -75,16 +85,16 @@ export function updateTx(id: string, patch: Partial<TxRecord>, wallet?: string):
   saveHistory(wallet, history)
 }
 
-/**
- * Estimasi USDC yang diterima setelah CCTP fee.
- * CCTP_MAX_FEE = 0.001 USDC — amount harus > fee ini.
- */
-export function estimateBridgeReceived(amountStr: string): { received: string; fee: string } {
-  const amount  = parseFloat(amountStr) || 0
-  const fee     = 0.001
-  const received = Math.max(0, amount - fee)
-  return {
-    received: received.toFixed(6),
-    fee:      fee.toFixed(6),
-  }
+export function clearAllHistory(wallet: string): void {
+  if (typeof window === 'undefined') return
+  localStorage.removeItem(storageKey(wallet))
+}
+
+export function getTotalPages(records: TxRecord[]): number {
+  return Math.max(1, Math.ceil(records.length / PAGE_SIZE))
+}
+
+export function getPage(records: TxRecord[], page: number): TxRecord[] {
+  const start = (page - 1) * PAGE_SIZE
+  return records.slice(start, start + PAGE_SIZE)
 }

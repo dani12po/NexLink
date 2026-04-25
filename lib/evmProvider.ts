@@ -1,85 +1,97 @@
 /**
  * lib/evmProvider.ts
- * Safe EVM wallet provider detection — EIP-6963 first, fallback to legacy window.ethereum
+ * EVM wallet provider detection — support EIP-6963 (multi-wallet) + EIP-1193 fallback.
  *
- * EIP-6963 (Multi Injected Provider Discovery) mencegah konflik antar extension wallet.
- * Tidak pernah memodifikasi atau menimpa window.ethereum.
+ * EIP-6963: standar modern untuk detect multiple injected wallets
+ * (MetaMask, Rabby, OKX, Trust, Coinbase, dll) tanpa konflik window.ethereum.
  */
+export const NO_WALLET_MSG = 'Wallet tidak ditemukan. Install MetaMask, Rabby, atau OKX Wallet.'
 
-export interface EIP6963ProviderInfo {
-  uuid: string
-  name: string
-  icon: string
-  rdns: string
+export interface WalletProvider {
+  info: {
+    uuid:  string
+    name:  string
+    icon:  string   // data URI
+    rdns:  string   // e.g. 'io.metamask', 'xyz.rabby'
+  }
+  provider: any    // EIP-1193 provider
 }
 
-export interface EIP6963ProviderDetail {
-  info: EIP6963ProviderInfo
-  provider: any
-}
-
-// Cache provider yang sudah ditemukan via EIP-6963
-let _eip6963Providers: EIP6963ProviderDetail[] = []
+// Registry wallet yang terdeteksi via EIP-6963
+let _eip6963Providers: WalletProvider[] = []
 let _eip6963Initialized = false
 
-function initEIP6963() {
-  if (_eip6963Initialized || typeof window === 'undefined') return
+/**
+ * Inisialisasi EIP-6963 listener — panggil sekali saat app mount.
+ * Mengumpulkan semua wallet yang announce diri.
+ */
+export function initEIP6963(): () => void {
+  if (typeof window === 'undefined') return () => {}
+
+  const onAnnounce = (event: any) => {
+    const detail = event.detail as WalletProvider
+    if (!detail?.info?.uuid) return
+    // Hindari duplikat
+    const exists = _eip6963Providers.some(p => p.info.uuid === detail.info.uuid)
+    if (!exists) _eip6963Providers = [..._eip6963Providers, detail]
+  }
+
+  window.addEventListener('eip6963:announceProvider', onAnnounce)
+  // Request semua wallet announce diri
+  window.dispatchEvent(new Event('eip6963:requestProvider'))
   _eip6963Initialized = true
 
-  window.addEventListener('eip6963:announceProvider', (event: any) => {
-    const detail = event.detail as EIP6963ProviderDetail
-    if (!detail?.provider || !detail?.info?.uuid) return
-    // Deduplicate by UUID
-    const exists = _eip6963Providers.find(p => p.info.uuid === detail.info.uuid)
-    if (!exists) {
-      _eip6963Providers.push(detail)
-    }
-  })
-
-  // Request existing providers to announce themselves
-  window.dispatchEvent(new Event('eip6963:requestProvider'))
+  return () => window.removeEventListener('eip6963:announceProvider', onAnnounce)
 }
 
-/**
- * Dapatkan semua EVM providers yang tersedia (EIP-6963)
- */
-export function getEIP6963Providers(): EIP6963ProviderDetail[] {
-  initEIP6963()
+/** Ambil semua wallet yang terdeteksi via EIP-6963 */
+export function getEIP6963Providers(): WalletProvider[] {
   return _eip6963Providers
 }
 
 /**
- * Dapatkan provider EVM yang aktif.
- * Priority: EIP-6963 first → named providers → window.ethereum (legacy)
- *
- * TIDAK pernah memodifikasi window.ethereum atau global state manapun.
+ * Ambil provider EIP-1193 terbaik yang tersedia.
+ * Urutan: EIP-6963 first → window.ethereum.providers[0] → window.ethereum
  */
 export function getEvmProvider(): any {
   if (typeof window === 'undefined') return null
 
-  // EIP-6963: gunakan provider pertama yang ditemukan
-  initEIP6963()
-  if (_eip6963Providers.length > 0) {
-    return _eip6963Providers[0].provider
+  // EIP-6963: ambil provider pertama yang announce
+  if (_eip6963Providers.length > 0) return _eip6963Providers[0].provider
+
+  // Fallback: window.ethereum (EIP-1193 lama)
+  const eth = (window as any).ethereum
+  if (!eth) return null
+  if (Array.isArray(eth.providers) && eth.providers.length > 0) return eth.providers[0]
+  return eth
+}
+
+/**
+ * Ambil provider berdasarkan RDNS (reverse DNS identifier).
+ * Contoh: 'io.metamask', 'xyz.rabby', 'com.okex.wallet'
+ */
+export function getProviderByRdns(rdns: string): any | null {
+  const found = _eip6963Providers.find(p => p.info.rdns === rdns)
+  return found?.provider ?? null
+}
+
+export async function requestEvmAccounts(): Promise<string | null> {
+  const eth = getEvmProvider()
+  if (!eth) return null
+  try {
+    const accs: string[] = await eth.request({ method: 'eth_requestAccounts' })
+    return accs?.[0] ?? null
+  } catch {
+    return null
   }
-
-  const w = window as any
-
-  // Legacy fallback — urutan dari yang paling spesifik
-  if (w.okxwallet) return w.okxwallet
-  if (w.coinbaseWalletExtension) return w.coinbaseWalletExtension
-  if (w.trustwallet) return w.trustwallet
-  if (w.braveEthereum) return w.braveEthereum
-
-  // window.ethereum terakhir karena bisa di-override oleh wallet manapun
-  if (w.ethereum) return w.ethereum
-
-  return null
 }
 
-export function hasEvmProvider(): boolean {
-  return getEvmProvider() !== null
+export async function getConnectedAccounts(): Promise<string[]> {
+  const eth = getEvmProvider()
+  if (!eth) return []
+  try {
+    return await eth.request({ method: 'eth_accounts' })
+  } catch {
+    return []
+  }
 }
-
-export const NO_WALLET_MSG =
-  'No EVM wallet detected. Please install MetaMask, OKX Wallet, Rabby, or any EIP-1193 compatible wallet.'

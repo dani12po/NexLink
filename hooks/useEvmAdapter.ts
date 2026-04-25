@@ -1,75 +1,62 @@
 /**
  * hooks/useEvmAdapter.ts
- * Buat ViemAdapter dari wallet provider yang sedang terkoneksi.
- * Adaptasi dari sample resmi Circle:
- * https://github.com/circlefin/circle-bridge-kit-transfer/blob/main/src/hooks/useEvmAdapter.ts
+ * Buat ViemAdapter dari window.ethereum (WalletButton) atau wagmi connector.
+ *
+ * Karena kita pakai WalletButton custom (window.ethereum langsung),
+ * useConnectorClient() biasanya return undefined — fallback ke getEvmProvider().
  */
 'use client'
-
 import { useEffect, useRef, useState } from 'react'
-import { useAccount, useConnectorClient } from 'wagmi'
-import { createViemAdapterFromProvider, type ViemAdapter } from '@circle-fin/adapter-viem-v2'
+import { useConnectorClient } from 'wagmi'
+import { createViemAdapterFromProvider } from '@circle-fin/adapter-viem-v2'
+import type { ViemAdapter } from '@circle-fin/adapter-viem-v2'
+import { useWallet } from '@/components/WalletButton'
+import { getEvmProvider } from '@/lib/evmProvider'
 
 export function useEvmAdapter() {
-  const { address }       = useAccount()
-  const { data: client }  = useConnectorClient()
-  const [adapter, setAdapter] = useState<ViemAdapter | null>(null)
-  const lastProviderRef   = useRef<any>(null)
-
-  /** Ambil EIP-1193 provider dari wagmi connector client atau window.ethereum */
-  function pickProvider(): any | null {
-    // Coba dari wagmi connector client dulu (lebih reliable)
-    const provider = (client as any)?.transport?.value?.provider
-    if (provider) return provider
-
-    // Fallback ke window.ethereum
-    const eth = (globalThis as any)?.ethereum
-    if (!eth) return null
-
-    // Multi-wallet: ambil provider pertama
-    if (Array.isArray(eth.providers) && eth.providers.length > 0) return eth.providers[0]
-    return eth
-  }
+  const { data: client }           = useConnectorClient()
+  const { address: walletAddress } = useWallet()
+  const [adapter, setAdapter]      = useState<ViemAdapter | null>(null)
+  const prevProviderRef            = useRef<any>(null)
 
   useEffect(() => {
     let cancelled = false
-
     ;(async () => {
-      // Wallet belum connect — reset adapter
-      if (!address) {
+      if (!walletAddress) {
+        if (!cancelled) { setAdapter(null); prevProviderRef.current = null }
+        return
+      }
+
+      // Urutan: wagmi connector → window.ethereum
+      const provider =
+        (client as any)?.transport?.value?.provider ??
+        (client as any)?.provider ??
+        getEvmProvider()
+
+      if (!provider) { if (!cancelled) setAdapter(null); return }
+      if (provider === prevProviderRef.current) return
+
+      try {
+        const newAdapter = await createViemAdapterFromProvider({ provider })
+        if (!cancelled) {
+          setAdapter(newAdapter)
+          prevProviderRef.current = provider
+          if (process.env.NODE_ENV === 'development') {
+            console.log('[useEvmAdapter] adapter ready, source:',
+              provider === getEvmProvider() ? 'window.ethereum' : 'wagmi connector')
+          }
+        }
+      } catch (e) {
         if (!cancelled) {
           setAdapter(null)
-          lastProviderRef.current = null
-        }
-        return
-      }
-
-      const provider = pickProvider()
-      if (!provider) {
-        if (!cancelled) setAdapter(null)
-        return
-      }
-
-      // Hanya rebuild adapter jika provider benar-benar berubah
-      if (provider !== lastProviderRef.current) {
-        try {
-          const newAdapter = await createViemAdapterFromProvider({ provider })
-          if (!cancelled) {
-            setAdapter(newAdapter)
-            lastProviderRef.current = provider
+          if (process.env.NODE_ENV === 'development') {
+            console.warn('[useEvmAdapter] createViemAdapterFromProvider gagal:', e)
           }
-        } catch (e) {
-          console.error('[useEvmAdapter] createViemAdapterFromProvider gagal:', e)
-          if (!cancelled) setAdapter(null)
         }
       }
     })()
-
     return () => { cancelled = true }
-  }, [client, address])
+  }, [client, walletAddress])
 
-  return {
-    evmAdapter:  adapter,
-    evmAddress:  address ?? null,
-  }
+  return { evmAdapter: adapter, evmAddress: walletAddress ?? null }
 }

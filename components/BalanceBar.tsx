@@ -1,56 +1,35 @@
 /**
  * components/BalanceBar.tsx
- * Menampilkan USDC balance real-time di Arc Testnet
+ * Tampilkan USDC balance Arc + Sepolia secara parallel.
+ * Auto-refresh 15 detik via useUsdcBalance.
  */
 'use client'
 
-import React, { useEffect, useState, useCallback } from 'react'
-import { createPublicClient, http, formatUnits, erc20Abi } from 'viem'
-import { ARC_USDC, ARC_RPC, ARC_CHAIN_ID, arcTestnet } from '@/lib/arcChain'
-import { useWallet } from './WalletButton'
+import React from 'react'
+import { ARC_CHAIN_ID } from '@/lib/arcChain'
+import { useUsdcBalance } from '@/hooks/useUsdcBalance'
+import { useWallet }      from './WalletButton'
 
-const arcClient = createPublicClient({
-  chain: arcTestnet as any,
-  transport: http(ARC_RPC),
-}) as any
+function Shimmer() {
+  return <span className="inline-block w-20 h-3 rounded bg-zinc-800 animate-pulse" />
+}
 
 export default function BalanceBar() {
   const { address, chainId, connected } = useWallet()
-  const [usdcBalance, setUsdcBalance] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
+  const { arc, sepolia, loading, refresh } = useUsdcBalance(null, address)
+  const [mounted, setMounted] = React.useState(false)
 
-  const fetchBalance = useCallback(async () => {
-    if (!address) { setUsdcBalance(null); return }
-    setLoading(true)
-    try {
-      const raw = await arcClient.readContract({
-        address: ARC_USDC,
-        abi: erc20Abi,
-        functionName: 'balanceOf',
-        args: [address as `0x${string}`],
-      })
-      setUsdcBalance(formatUnits(raw, 6))
-    } catch {
-      setUsdcBalance(null)
-    } finally {
-      setLoading(false)
-    }
-  }, [address])
+  React.useEffect(() => { setMounted(true) }, [])
 
-  useEffect(() => {
-    fetchBalance()
-    const interval = setInterval(fetchBalance, 15000)
-    return () => clearInterval(interval)
-  }, [fetchBalance])
+  // Jangan render apapun saat SSR — hindari hydration mismatch
+  if (!mounted || !connected) return null
 
   const isArc = chainId === ARC_CHAIN_ID
-
-  if (!connected) return null
 
   return (
     <div className="border-b border-zinc-800 bg-zinc-950/60">
       <div className="mx-auto max-w-6xl px-4 py-2 flex items-center justify-between gap-4 text-xs">
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-4 flex-wrap">
           {/* Network indicator */}
           <div className="flex items-center gap-1.5">
             <span className={`w-1.5 h-1.5 rounded-full ${isArc ? 'bg-emerald-400' : 'bg-amber-400'}`} />
@@ -59,39 +38,36 @@ export default function BalanceBar() {
             </span>
           </div>
 
-          {/* USDC Balance on Arc */}
+          {/* Arc balance */}
           <div className="flex items-center gap-1.5 text-zinc-400">
-            <span>Arc USDC:</span>
-            {loading ? (
-              <span className="text-zinc-600">…</span>
-            ) : usdcBalance !== null ? (
-              <span className="text-zinc-200 font-mono font-medium">
-                {parseFloat(usdcBalance).toFixed(4)} USDC
-              </span>
-            ) : (
-              <span className="text-zinc-600">—</span>
-            )}
-            <button
-              type="button"
-              onClick={fetchBalance}
-              className="text-zinc-600 hover:text-zinc-400 transition-colors ml-1"
-              title="Refresh balance"
-            >
-              ↻
-            </button>
+            <span>Arc:</span>
+            {loading ? <Shimmer /> : <span className="text-zinc-200 font-mono font-medium">{arc} USDC</span>}
           </div>
+
+          {/* Sepolia balance */}
+          <div className="flex items-center gap-1.5 text-zinc-400">
+            <span>Sepolia:</span>
+            {loading ? <Shimmer /> : <span className="text-zinc-200 font-mono font-medium">{sepolia} USDC</span>}
+          </div>
+
+          <button
+            type="button"
+            onClick={refresh}
+            className="text-zinc-600 hover:text-zinc-400 transition-colors"
+            title="Refresh balance"
+          >
+            ↻
+          </button>
         </div>
 
-        <div className="flex items-center gap-3 text-zinc-600">
-          <a
-            href="https://faucet.circle.com"
-            target="_blank"
-            rel="noreferrer"
-            className="hover:text-zinc-400 transition-colors"
-          >
-            Get testnet USDC ↗
-          </a>
-        </div>
+        <a
+          href="https://faucet.circle.com"
+          target="_blank"
+          rel="noreferrer"
+          className="text-xs text-zinc-600 hover:text-zinc-400 transition-colors"
+        >
+          Get testnet USDC ↗
+        </a>
       </div>
     </div>
   )
