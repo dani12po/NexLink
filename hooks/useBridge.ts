@@ -54,8 +54,8 @@ const CHAIN_CFG: Record<string, ChainCfg> = {
     domain:         ARC_CCTP_DOMAIN,
     explorer:       ARC_EXPLORER,
     manualPoll:     true,
-    approveGas:     100_000n,
-    burnGas:        300_000n,
+    approveGas:     150_000n,  // naikkan dari 100k — Arc EIP-1559 butuh lebih
+    burnGas:        400_000n,  // naikkan dari 300k
     addChainParams: {
       chainId:     ARC_CHAIN_ID_HEX,
       chainName:   'Arc Testnet',
@@ -205,7 +205,10 @@ async function waitReceiptManual(client: any, hash: Hex, rpcUrls: string[], inte
           }
         } else if (!tx) {
           // Tx tidak ada sama sekali — mungkin di-drop
-          throw new Error(`Tx tidak ditemukan di network Arc. Mungkin di-drop karena gas terlalu rendah. Hash: ${hash}`)
+          // Tunggu dulu sampai attempt ke-20 (40 detik) sebelum declare dropped
+          if (attempt > 20) {
+            throw new Error(`Tx tidak ditemukan di network Arc setelah ${attempt * 2}s. Mungkin di-drop. Hash: ${hash}`)
+          }
         }
       } catch (fetchErr: any) {
         if (fetchErr?.message?.includes('reverted') || fetchErr?.message?.includes('tidak ditemukan')) throw fetchErr
@@ -363,10 +366,16 @@ export function useBridge() {
         const approveTxHash = await eth.request({
           method: 'eth_sendTransaction',
           params: [{
-            from:  walletAddress,
-            to:    src.usdc,
-            data:  approveData,
+            from:                 walletAddress,
+            to:                   src.usdc,
+            data:                 approveData,
+            // Gas eksplisit — Arc RPC sering return estimasi = 0
+            // Gas price 25 Gwei (sedikit di atas current 20 Gwei) agar tidak di-drop
             ...(src.approveGas ? { gas: `0x${src.approveGas.toString(16)}` } : {}),
+            ...(src.manualPoll ? {
+              maxFeePerGas:         '0x5E0D4C000', // 25.2 Gwei
+              maxPriorityFeePerGas: '0x5E0D4C000', // 25.2 Gwei
+            } : {}),
           }],
         }) as string
 
@@ -394,6 +403,10 @@ export function useBridge() {
           to:   src.tokenMessenger,
           data: burnData,
           ...(src.burnGas ? { gas: `0x${src.burnGas.toString(16)}` } : {}),
+          ...(src.manualPoll ? {
+            maxFeePerGas:         '0x5E0D4C000', // 25.2 Gwei
+            maxPriorityFeePerGas: '0x5E0D4C000', // 25.2 Gwei
+          } : {}),
         }],
       }) as string
 
