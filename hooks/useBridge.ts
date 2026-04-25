@@ -7,13 +7,15 @@
  *   (bukan via server proxy) karena Vercel IP diblokir Circle Iris (403).
  * - Arc receipt polling menggunakan interval 1.5s (Arc = deterministic finality).
  * - Gas selalu di-hardcode untuk Arc (RPC sering return estimasi = 0).
+ * - Fee diambil dari Circle API resmi: GET /v2/burn/USDC/fees
+ *   Ref: https://developers.circle.com/cctp/howtos/get-transfer-fee
  */
 'use client'
 
 import { useState, useCallback, useRef } from 'react'
 import {
   createWalletClient, createPublicClient, custom, http, fallback,
-  parseUnits, erc20Abi, keccak256, type Hex, type Log,
+  parseUnits, formatUnits, erc20Abi, keccak256, type Hex, type Log,
 } from 'viem'
 import { sepolia } from 'viem/chains'
 import {
@@ -21,10 +23,10 @@ import {
   ARC_USDC, ARC_TOKEN_MESSENGER, ARC_MESSAGE_TRANSMITTER, ARC_CCTP_DOMAIN,
   SEPOLIA_CHAIN_ID_HEX, SEPOLIA_RPC, SEPOLIA_RPC_BACKUP, SEPOLIA_RPC_FALLBACK3,
   SEPOLIA_USDC, SEPOLIA_TOKEN_MESSENGER, SEPOLIA_CCTP_DOMAIN,
-  CCTP_FAST_FINALITY, CCTP_MAX_FEE, IRIS_API, arcTestnet,
+  CCTP_FAST_FINALITY, IRIS_API, arcTestnet,
   ARC_EXPLORER, SEPOLIA_EXPLORER,
 } from '@/lib/arcChain'
-import { addTx, updateTx, estimateBridgeReceived } from '@/lib/txHistory'
+import { addTx, updateTx } from '@/lib/txHistory'
 
 // ─── ABIs ──────────────────────────────────────────────────────────────────
 const TOKEN_MESSENGER_ABI = [
@@ -48,6 +50,91 @@ export type BridgeDirection = 'sepolia-to-arc' | 'arc-to-sepolia'
 export type BridgeStatus =
   | 'idle' | 'approving' | 'burning'
   | 'awaiting_attestation' | 'minting' | 'success' | 'error'
+
+export interface CctpFeeInfo {
+  /** Fee dalam USDC units (6 decimals) */
+  feeUnits:    bigint
+  /** Fee dalam USDC string (human readable) */
+  feeUsdc:     string
+  /** minFinalityThreshold yang dipakai (1000=Fast, 2000=Standard) */
+  finality:    number
+  /** Apakah Fast Transfer tersedia (ada allowance) */
+  isFast:      boolean
+}
+
+/**
+ * Ambil fee CCTP dari Circle API resmi.
+ * GET /v2/burn/USDC/fees?sourceDomain=&destinationDomain=
+ * Ref: https://developers.circle.com/cctp/howtos/get-transfer-fee
+ *
+ * Fee dalam basis points (1 = 0.01%).
+ * Untuk amount kecil di testnet, fee minimum = 1 unit (0.000001 USDC).
+ */
+export async function fetchCctpFee(
+  sourceDomain: number,
+  destinationDomain: number,
+  amountUnits: bigint,
+): Promise<CctpFeeInfo> {
+  try {
+    const res = await fetch(
+      `${IRIS_API}/v2/burn/USDC/fees?sourceDomain=${sourceDomain}&destinationDomain=${destinationDomain}`,
+      { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(8_000) },
+    )
+    if (res.ok) {
+      const data = await res.json() as any
+      // Response: { fees: [{ finalityThreshold: 1000, minimumFee: 1 }, { finalityThreshold: 2000, minimumFee: 0 }] }
+      const fees: Array<{ finalityThreshold: number; minimumFee: number }> = data?.fees ?? []
+
+      // Pilih Fast Transfer (1000) jika ada, fallback ke Standard (2000)
+      const fastFee     = fees.find(f => f.finalityThreshold === 1000)
+      const standardFee = fees.find(f => f.finalityThreshold === 2000)
+      const chosen      = fastFee ?? standardFee
+
+      if (chosen) {
+        // minimumFee dalam basis points (1 = 0.01%)
+        // Fee = max(minimumFee_units, amount * bps / 10000)
+        // Untuk testnet minimumFee biasanya 1 unit = 0.000001 USDC
+        const bps        = BigInt(chosen.minimumFee)
+        const feeByBps   = (amountUnits * bps) / 10_000n
+        const feeUnits   = feeByBps < 1n ? 1n : feeByBps  // minimum 1 unit
+        const feeUsdc    = formatUnits(feeUnits, 6)
+        return {
+          feeUnits,
+          feeUsdc,
+          finality: chosen.finalityThreshold,
+          isFast:   chosen.finalityThreshold === 1000,
+        }
+      }
+    }
+  } catch { /* fallback ke default */ }
+
+  // Fallback: 0.001 USDC flat (1000 units) jika API tidak tersedia
+  return {
+    feeUnits: 1_000n,
+    feeUsdc:  '0.001000',
+    finality: CCTP_FAST_FINALITY,
+    isFast:   true,
+  }
+}
+
+/**
+ * Cek sisa Fast Transfer allowance dari Circle API.
+ * GET /v2/fastBurn/USDC/allowance
+ * Ref: https://developers.circle.com/cctp/howtos/get-fast-transfer-allowance
+ */
+export async function fetchFastAllowance(): Promise<string | null> {
+  try {
+    const res = await fetch(
+      `${IRIS_API}/v2/fastBurn/USDC/allowance`,
+      { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(5_000) },
+    )
+    if (res.ok) {
+      const data = await res.json() as any
+      return data?.allowance ?? null
+    }
+  } catch { /* ignore */ }
+  return null
+}
 
 export interface BridgeState {
   status:      BridgeStatus
@@ -249,15 +336,19 @@ export function useBridge() {
     const isArcSource = direction === 'arc-to-sepolia'
     const dest        = (recipientAddress?.trim() || walletAddress) as `0x${string}`
     const amountUnits = parseUnits(amount, 6)
-    const est         = estimateBridgeReceived(amount)
+
+    // Ambil fee dari Circle API resmi
+    const srcDomain = isArcSource ? ARC_CCTP_DOMAIN : SEPOLIA_CCTP_DOMAIN
+    const dstDomain = isArcSource ? SEPOLIA_CCTP_DOMAIN : ARC_CCTP_DOMAIN
+    const feeInfo   = await fetchCctpFee(srcDomain, dstDomain, amountUnits)
 
     const txRecord = addTx({
       type: 'bridge', status: 'pending', direction,
       fromChain:      isArcSource ? 'Arc Testnet' : 'Ethereum Sepolia',
       toChain:        isArcSource ? 'Ethereum Sepolia' : 'Arc Testnet',
       amountSent:     amount,
-      amountReceived: est.received,
-      fee:            est.fee,
+      amountReceived: formatUnits(amountUnits - feeInfo.feeUnits, 6),
+      fee:            feeInfo.feeUsdc,
       wallet:         walletAddress,
     })
 
@@ -276,8 +367,6 @@ export function useBridge() {
 
       const srcUsdc      = isArcSource ? ARC_USDC      : SEPOLIA_USDC
       const srcMessenger = isArcSource ? ARC_TOKEN_MESSENGER : SEPOLIA_TOKEN_MESSENGER
-      const dstDomain    = isArcSource ? SEPOLIA_CCTP_DOMAIN : ARC_CCTP_DOMAIN
-      const srcDomain    = isArcSource ? ARC_CCTP_DOMAIN : SEPOLIA_CCTP_DOMAIN
       const srcRpc       = isArcSource ? ARC_RPC : SEPOLIA_RPC
       const srcRpcBackup = isArcSource ? ARC_RPC_BACKUP : SEPOLIA_RPC_BACKUP
 
@@ -350,8 +439,8 @@ export function useBridge() {
           addrToBytes32(dest),
           srcUsdc,
           ZERO_BYTES32,
-          CCTP_MAX_FEE,
-          CCTP_FAST_FINALITY,
+          feeInfo.feeUnits,      // maxFee dari Circle API
+          feeInfo.finality,      // minFinalityThreshold dari Circle API
         ],
         account: walletAddress as `0x${string}`,
       }

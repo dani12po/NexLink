@@ -5,15 +5,15 @@
  */
 'use client'
 
-import React, { useState, useMemo, useEffect, useCallback } from 'react'
-import { createPublicClient, http, fallback, formatUnits, erc20Abi } from 'viem'
+import React, { useState, useEffect, useCallback } from 'react'
+import { createPublicClient, http, fallback, formatUnits, erc20Abi, parseUnits } from 'viem'
 import { sepolia } from 'viem/chains'
 import {
   ARC_USDC, ARC_EXPLORER, ARC_RPC, ARC_RPC_BACKUP, ARC_RPC_BACKUP2, arcTestnet,
   SEPOLIA_USDC, SEPOLIA_RPC, SEPOLIA_RPC_BACKUP, SEPOLIA_RPC_FALLBACK3, SEPOLIA_EXPLORER,
 } from '@/lib/arcChain'
 import { estimateBridgeReceived, loadHistory, type TxRecord } from '@/lib/txHistory'
-import { useBridge, type BridgeDirection } from '@/hooks/useBridge'
+import { useBridge, type BridgeDirection, fetchCctpFee, fetchFastAllowance, type CctpFeeInfo } from '@/hooks/useBridge'
 import { useWallet } from './WalletButton'
 import { getEvmProvider, NO_WALLET_MSG } from '@/lib/evmProvider'
 
@@ -83,12 +83,39 @@ export default function BridgePanel() {
   const [balances,  setBalances]  = useState({ sepolia: '—', arc: '—' })
   const [history,   setHistory]   = useState<TxRecord[]>([])
   const [showHistory, setShowHistory] = useState(false)
+  const [feeInfo,   setFeeInfo]   = useState<CctpFeeInfo | null>(null)
+  const [fastAllowance, setFastAllowance] = useState<string | null>(null)
+  const [feeLoading, setFeeLoading] = useState(false)
 
   const isBusy = state.status !== 'idle' && state.status !== 'success' && state.status !== 'error'
   const srcLabel = direction === 'sepolia-to-arc' ? 'Sepolia' : 'Arc Testnet'
   const dstLabel = direction === 'sepolia-to-arc' ? 'Arc Testnet' : 'Sepolia'
   const dstExplorer = direction === 'sepolia-to-arc' ? ARC_EXPLORER : SEPOLIA_EXPLORER
-  const estimate = useMemo(() => estimateBridgeReceived(amount), [amount])
+
+  // Gunakan fee dari Circle API jika tersedia, fallback ke estimasi lokal
+  const feeDisplay = feeInfo
+    ? { fee: feeInfo.feeUsdc, received: (parseFloat(amount || '0') - parseFloat(feeInfo.feeUsdc)).toFixed(6) }
+    : { fee: '0.001000', received: Math.max(0, parseFloat(amount || '0') - 0.001).toFixed(6) }
+
+  /* ── Fetch fee dari Circle API ────────────────────────────────────── */
+  useEffect(() => {
+    const amt = parseFloat(amount)
+    if (!amount || isNaN(amt) || amt <= 0) { setFeeInfo(null); return }
+
+    const src = direction === 'sepolia-to-arc' ? 0 : 26
+    const dst = direction === 'sepolia-to-arc' ? 26 : 0
+
+    setFeeLoading(true)
+    fetchCctpFee(src, dst, parseUnits(amount, 6))
+      .then(f => setFeeInfo(f))
+      .catch(() => setFeeInfo(null))
+      .finally(() => setFeeLoading(false))
+  }, [amount, direction])
+
+  /* ── Fetch fast allowance ─────────────────────────────────────────── */
+  useEffect(() => {
+    fetchFastAllowance().then(a => setFastAllowance(a)).catch(() => {})
+  }, [])
 
   /* ── Balances ─────────────────────────────────────────────────────── */
   const fetchBalances = useCallback(async () => {
@@ -206,13 +233,22 @@ export default function BridgePanel() {
             <span className="text-zinc-300 font-medium">{amount} USDC</span>
           </div>
           <div className="flex justify-between text-zinc-500">
-            <span>CCTP fee</span>
-            <span className="text-red-400">− {estimate.fee} USDC</span>
+            <span>
+              CCTP fee {feeInfo?.isFast ? <span className="text-sky-500 ml-1">⚡ Fast</span> : ''}
+              {feeLoading && <span className="text-zinc-600 ml-1">…</span>}
+            </span>
+            <span className="text-red-400">− {feeDisplay.fee} USDC</span>
           </div>
           <div className="border-t border-zinc-800 pt-1.5 flex justify-between">
             <span className="text-zinc-400">Kamu terima (estimasi)</span>
-            <span className="text-emerald-400 font-semibold">{estimate.received} USDC</span>
+            <span className="text-emerald-400 font-semibold">{feeDisplay.received} USDC</span>
           </div>
+          {fastAllowance && (
+            <div className="flex justify-between text-zinc-600 pt-0.5 border-t border-zinc-800/50">
+              <span>Fast Transfer allowance</span>
+              <span>{parseFloat(fastAllowance).toFixed(2)} USDC</span>
+            </div>
+          )}
         </div>
       )}
 
