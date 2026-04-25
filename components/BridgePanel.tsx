@@ -91,7 +91,7 @@ export default function BridgePanel() {
   const { address: walletAddress } = useWallet()
   const evmAddress = walletAddress || wagmiAddress
 
-  const { bridge, retry, estimate, isLoading, error, result, clear } = useBridge()
+  const { executeBridge, isLoading, error, result, clear } = useBridge()
   const { currentStep, setCurrentStep, stepLabel, logs, handleEvent, reset: resetProgress } = useProgress()
   const { switchChainAsync } = useSwitchChain()
 
@@ -121,27 +121,13 @@ export default function BridgePanel() {
   const isDone = currentStep === 'completed'
   const isErr  = currentStep === 'error' || !!error
 
-  /* ── Estimasi fee saat amount berubah ─────────────────────────────── */
+  /* ── Estimasi fee — pakai nilai default CCTP_MAX_FEE ─────────────── */
   useEffect(() => {
     const amt = parseFloat(amount)
-    if (!evmAdapter || !amount || isNaN(amt) || amt <= 0) {
-      setFeeEstimate(null)
-      return
-    }
-    const timer = setTimeout(async () => {
-      setFetchingFee(true)
-      try {
-        const est = await estimate({
-          fromChain: sourceChain, toChain: destinationChain,
-          amount, fromAdapter: evmAdapter, toAdapter: evmAdapter,
-        }) as any
-        // est.fee dalam USDC units atau string
-        if (est?.fee) setFeeEstimate(String(est.fee))
-      } catch { setFeeEstimate(null) }
-      finally { setFetchingFee(false) }
-    }, 600) // debounce 600ms
-    return () => clearTimeout(timer)
-  }, [amount, sourceChain, destinationChain, evmAdapter])
+    if (!amount || isNaN(amt) || amt <= 0) { setFeeEstimate(null); return }
+    // CCTP_MAX_FEE = 0.001 USDC
+    setFeeEstimate('0.001')
+  }, [amount])
 
   /* ── Flip direction ───────────────────────────────────────────────── */
   function flipDirection() {
@@ -164,21 +150,6 @@ export default function BridgePanel() {
       return
     }
 
-    // Jika adapter belum siap (wagmi belum sync), coba buat dari window.ethereum
-    let adapter = evmAdapter
-    if (!adapter) {
-      try {
-        const { createViemAdapterFromProvider } = await import('@circle-fin/adapter-viem-v2')
-        const { getEvmProvider } = await import('@/lib/evmProvider')
-        const provider = getEvmProvider()
-        if (provider) adapter = await createViemAdapterFromProvider({ provider })
-      } catch { /* ignore */ }
-    }
-    if (!adapter) {
-      alert('Wallet adapter tidak siap. Coba refresh halaman.')
-      return
-    }
-
     resetProgress()
     clear()
     // Tampilkan step indicator SEGERA — jangan tunggu event dari BridgeKit
@@ -193,17 +164,16 @@ export default function BridgePanel() {
         } catch { /* user mungkin sudah di chain yang benar */ }
       }
 
-      await bridge(
-        {
-          fromChain:        sourceChain,
-          toChain:          destinationChain,
-          amount,
-          fromAdapter:      adapter,
-          toAdapter:        adapter,
-          recipientAddress: useRecipient && recipient.trim() ? recipient.trim() : undefined,
+      await executeBridge({
+        fromChain:        sourceChain,
+        toChain:          destinationChain,
+        amount,
+        walletAddress:    evmAddress,
+        recipientAddress: useRecipient && recipient.trim() ? recipient.trim() : undefined,
+        onEvent: (method, state, txHash, errorMsg) => {
+          handleEvent({ method, values: { state, txHash, error: errorMsg } })
         },
-        { onEvent: handleEvent },
-      )
+      })
 
       // Refresh balance setelah selesai
       await Promise.all([refreshSrcBalance(), refreshDstBalance()])
@@ -212,20 +182,17 @@ export default function BridgePanel() {
 
   /* ── Retry ────────────────────────────────────────────────────────── */
   async function handleRetry() {
-    if (!result) return
-    let adapter = evmAdapter
-    if (!adapter) {
-      try {
-        const { createViemAdapterFromProvider } = await import('@circle-fin/adapter-viem-v2')
-        const { getEvmProvider } = await import('@/lib/evmProvider')
-        const provider = getEvmProvider()
-        if (provider) adapter = await createViemAdapterFromProvider({ provider })
-      } catch { return }
-    }
-    if (!adapter) return
+    if (!result || !evmAddress) return
     resetProgress()
+    setCurrentStep('approving')
     try {
-      await retry(result, { fromAdapter: adapter, toAdapter: adapter }, { onEvent: handleEvent })
+      await executeBridge({
+        fromChain: sourceChain, toChain: destinationChain,
+        amount, walletAddress: evmAddress,
+        onEvent: (method, state, txHash, errorMsg) => {
+          handleEvent({ method, values: { state, txHash, error: errorMsg } })
+        },
+      })
       await Promise.all([refreshSrcBalance(), refreshDstBalance()])
     } catch { /* error sudah di-handle */ }
   }
