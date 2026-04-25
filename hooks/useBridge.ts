@@ -1,23 +1,17 @@
 /**
  * hooks/useBridge.ts
- * Manual CCTP V2 bridge — approve ERC-20 standar (kompatibel OKX/semua wallet).
+ * Manual CCTP V2 — flow IDENTIK untuk kedua arah.
+ * Perbedaan hanya di CHAIN_CONFIG, bukan di logika.
  *
- * KENAPA TIDAK PAKAI BRIDGEKIT:
- * BridgeKit menggunakan Permit2 signature (EIP-712) untuk approve.
- * OKX Wallet memblokir Permit2 signature dengan pesan "Transaksi ini berisiko".
- * Solusi: pakai approve() ERC-20 standar yang semua wallet support.
- *
- * ARSITEKTUR:
- * - Approve + Burn: dari browser via wallet (ERC-20 approve standar)
- * - Attestation polling: dari browser langsung ke Iris (tidak kena IP block)
- * - Mint: via server relayer /api/bridge/mint (bypass wallet restriction)
+ * Pakai ERC-20 approve() standar (bukan Permit2) → kompatibel OKX/semua wallet.
+ * Attestation polling dari browser langsung → tidak kena IP block Vercel.
  */
 'use client'
 
 import { useState, useCallback } from 'react'
 import {
   createWalletClient, createPublicClient, custom, http, fallback,
-  parseUnits, erc20Abi, keccak256, type Hex, type Log,
+  parseUnits, erc20Abi, keccak256, type Hex,
 } from 'viem'
 import { sepolia } from 'viem/chains'
 import {
@@ -26,11 +20,61 @@ import {
   SEPOLIA_CHAIN_ID_HEX, SEPOLIA_RPC, SEPOLIA_RPC_BACKUP, SEPOLIA_RPC_FALLBACK3,
   SEPOLIA_USDC, SEPOLIA_TOKEN_MESSENGER, SEPOLIA_CCTP_DOMAIN,
   CCTP_FAST_FINALITY, CCTP_MAX_FEE, IRIS_API, arcTestnet,
-  ARC_EXPLORER, SEPOLIA_EXPLORER,
-  BRIDGE_KIT_CHAIN_ARC,
+  ARC_EXPLORER, BRIDGE_KIT_CHAIN_ARC, BRIDGE_KIT_CHAIN_SEPOLIA,
 } from '@/lib/arcChain'
 import { addTx, updateTx } from '@/lib/txHistory'
 import { getEvmProvider } from '@/lib/evmProvider'
+
+// ─── Chain Config ──────────────────────────────────────────────────────────
+// Semua perbedaan antar chain ada di sini — flow tidak perlu tahu arah
+interface ChainCfg {
+  chainIdHex:    string
+  viemChain:     any
+  rpcUrls:       string[]
+  usdc:          `0x${string}`
+  tokenMessenger:`0x${string}`
+  domain:        number
+  explorer:      string
+  // Arc butuh manual receipt polling (RPC tidak reliable untuk waitForTransactionReceipt)
+  manualPoll:    boolean
+  // Gas override — Arc RPC sering return estimasi = 0
+  approveGas?:   bigint
+  burnGas?:      bigint
+  // Cara switch chain di wallet
+  addChainParams?: object
+}
+
+const CHAIN_CFG: Record<string, ChainCfg> = {
+  [BRIDGE_KIT_CHAIN_ARC]: {
+    chainIdHex:     ARC_CHAIN_ID_HEX,
+    viemChain:      arcTestnet as any,
+    rpcUrls:        [ARC_RPC, ARC_RPC_BACKUP, ARC_RPC_BACKUP2],
+    usdc:           ARC_USDC,
+    tokenMessenger: ARC_TOKEN_MESSENGER,
+    domain:         ARC_CCTP_DOMAIN,
+    explorer:       ARC_EXPLORER,
+    manualPoll:     true,
+    approveGas:     100_000n,
+    burnGas:        300_000n,
+    addChainParams: {
+      chainId:     ARC_CHAIN_ID_HEX,
+      chainName:   'Arc Testnet',
+      rpcUrls:     [ARC_RPC],
+      nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 6 },
+      blockExplorerUrls: [ARC_EXPLORER],
+    },
+  },
+  [BRIDGE_KIT_CHAIN_SEPOLIA]: {
+    chainIdHex:     SEPOLIA_CHAIN_ID_HEX,
+    viemChain:      sepolia,
+    rpcUrls:        [SEPOLIA_RPC, SEPOLIA_RPC_BACKUP, SEPOLIA_RPC_FALLBACK3],
+    usdc:           SEPOLIA_USDC,
+    tokenMessenger: SEPOLIA_TOKEN_MESSENGER,
+    domain:         SEPOLIA_CCTP_DOMAIN,
+    explorer:       'https://sepolia.etherscan.io',
+    manualPoll:     false,
+  },
+}
 
 // ─── ABIs ──────────────────────────────────────────────────────────────────
 const TOKEN_MESSENGER_ABI = [
@@ -53,12 +97,12 @@ const TOKEN_MESSENGER_ABI = [
 export type BridgeDirection = 'sepolia-to-arc' | 'arc-to-sepolia'
 
 export interface ExecuteBridgeParams {
-  fromChain:         string   // BRIDGE_KIT_CHAIN_ARC atau BRIDGE_KIT_CHAIN_SEPOLIA
+  fromChain:         string
   toChain:           string
   amount:            string
   walletAddress:     string
   recipientAddress?: string
-  onEvent:           (method: string, state: string, txHash?: string, error?: string) => void
+  onEvent:           (method: string, state: string, txHash?: string, extra?: string) => void
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -68,7 +112,6 @@ const ZERO_BYTES32 = '0x00000000000000000000000000000000000000000000000000000000
 function addrToBytes32(addr: string): Hex {
   return `0x${addr.replace(/^0x/, '').toLowerCase().padStart(64, '0')}` as Hex
 }
-
 function sleep(ms: number) { return new Promise<void>(r => setTimeout(r, ms)) }
 
 function extractMessageBytes(logs: any[]): Hex | null {
@@ -89,9 +132,9 @@ function extractMessageBytes(logs: any[]): Hex | null {
 async function fetchMsgBytesFromRpc(rpcUrl: string, txHash: string, blockNumber: number): Promise<Hex | null> {
   const blockHex = `0x${blockNumber.toString(16)}`
   for (const [id, method, params] of [
-    [1, 'eth_getLogs', [{ fromBlock: blockHex, toBlock: blockHex, topics: [MESSAGE_SENT_TOPIC] }]],
-    [2, 'eth_getTransactionReceipt', [txHash]],
-    [3, 'eth_getLogs', [{ fromBlock: `0x${Math.max(0, blockNumber - 5).toString(16)}`, toBlock: `0x${(blockNumber + 2).toString(16)}`, topics: [MESSAGE_SENT_TOPIC] }]],
+    [1, 'eth_getLogs',              [{ fromBlock: blockHex, toBlock: blockHex, topics: [MESSAGE_SENT_TOPIC] }]],
+    [2, 'eth_getTransactionReceipt',[txHash]],
+    [3, 'eth_getLogs',              [{ fromBlock: `0x${Math.max(0, blockNumber - 5).toString(16)}`, toBlock: `0x${(blockNumber + 2).toString(16)}`, topics: [MESSAGE_SENT_TOPIC] }]],
   ] as const) {
     try {
       const res  = await fetch(rpcUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id, method, params }) })
@@ -105,11 +148,14 @@ async function fetchMsgBytesFromRpc(rpcUrl: string, txHash: string, blockNumber:
   return null
 }
 
-/** Arc: manual receipt polling 1.5s (deterministic finality) */
-async function waitArcReceipt(client: any, hash: Hex, maxMs = 180_000): Promise<any> {
+/**
+ * Tunggu receipt dengan manual polling.
+ * Dipakai untuk chain yang RPC-nya tidak reliable untuk waitForTransactionReceipt.
+ */
+async function waitReceiptManual(client: any, hash: Hex, intervalMs = 1_500, maxMs = 180_000): Promise<any> {
   const deadline = Date.now() + maxMs
   while (Date.now() < deadline) {
-    await sleep(1_500)
+    await sleep(intervalMs)
     try {
       const r = await client.getTransactionReceipt({ hash })
       if (r?.status === 'success') return r
@@ -118,14 +164,24 @@ async function waitArcReceipt(client: any, hash: Hex, maxMs = 180_000): Promise<
       if (e?.message?.includes('reverted')) throw e
     }
   }
-  throw new Error('Timeout menunggu konfirmasi di Arc Testnet. Cek ArcScan untuk status.')
+  throw new Error(`Timeout menunggu konfirmasi. Cek explorer untuk status tx: ${hash}`)
 }
 
 /**
- * Poll Circle Iris LANGSUNG dari browser.
- * Browser tidak kena IP restriction — Iris support CORS.
- * Vercel serverless diblokir Iris (403).
+ * Tunggu receipt — pilih metode berdasarkan config chain.
+ * manualPoll=true: manual polling (Arc)
+ * manualPoll=false: waitForTransactionReceipt viem (Sepolia)
  */
+async function waitReceipt(client: any, hash: Hex, cfg: ChainCfg): Promise<any> {
+  if (cfg.manualPoll) {
+    return waitReceiptManual(client, hash)
+  }
+  return client.waitForTransactionReceipt({
+    hash, confirmations: 1, timeout: 180_000, pollingInterval: 3_000,
+  })
+}
+
+/** Poll Iris langsung dari browser — tidak kena IP block */
 async function pollIrisDirect(sourceDomain: number, txHash: string): Promise<string | null> {
   try {
     const res = await fetch(
@@ -138,10 +194,11 @@ async function pollIrisDirect(sourceDomain: number, txHash: string): Promise<str
     if (msg?.status === 'complete' && msg?.attestation && msg.attestation !== 'PENDING') {
       return msg.attestation as string
     }
-  } catch { /* timeout atau network error */ }
+  } catch { /* timeout */ }
   return null
 }
 
+/** Fallback: poll via server proxy */
 async function pollIrisViaProxy(sourceDomain: number, txHash: string, messageHash: string): Promise<string | null> {
   try {
     const params = new URLSearchParams({ sourceDomain: String(sourceDomain), txHash, messageHash })
@@ -157,12 +214,12 @@ async function pollAttestation(
   sourceDomain: number,
   txHash: string,
   messageHash: string,
-  isArcSource: boolean,
   onProgress: (msg: string) => void,
   abortSignal: AbortSignal,
 ): Promise<string> {
-  const BASE  = isArcSource ? 2_000 : 5_000
-  const MAX   = isArcSource ? 15_000 : 30_000
+  // Arc finality instan → mulai 2s; Sepolia ~12 blok → mulai 5s
+  const BASE  = sourceDomain === ARC_CCTP_DOMAIN ? 2_000 : 5_000
+  const MAX   = sourceDomain === ARC_CCTP_DOMAIN ? 15_000 : 30_000
   const LIMIT = 30 * 60 * 1_000
   const start = Date.now()
 
@@ -170,15 +227,10 @@ async function pollAttestation(
     if (abortSignal.aborted) throw new Error('Bridge dibatalkan')
     if (Date.now() - start > LIMIT) throw new Error('Attestation timeout (30 menit). USDC sudah di-burn — coba mint manual nanti.')
 
-    const delay = Math.min(BASE * Math.pow(1.3, Math.min(i, 10)), MAX)
-    await sleep(delay)
+    await sleep(Math.min(BASE * Math.pow(1.3, Math.min(i, 10)), MAX))
 
     const elapsed = Math.floor((Date.now() - start) / 1_000)
-    if (i % 3 === 0) {
-      onProgress(isArcSource
-        ? `Menunggu attestation… ${elapsed}s (Arc finality instan, biasanya 1–5 menit)`
-        : `Menunggu attestation… ${elapsed}s (Sepolia ~12 blok, bisa 3–20 menit)`)
-    }
+    if (i % 3 === 0) onProgress(`Menunggu attestation… ${elapsed}s`)
 
     const att = await pollIrisDirect(sourceDomain, txHash)
       ?? await pollIrisViaProxy(sourceDomain, txHash, messageHash)
@@ -191,149 +243,126 @@ export function useBridge() {
   const [isLoading, setIsLoading] = useState(false)
   const [error,     setError]     = useState<string | null>(null)
   const [result,    setResult]    = useState<{ mintTxHash?: string; explorerUrl?: string } | null>(null)
-  const abortRef = { current: new AbortController() }
+  const abortCtrl = { current: new AbortController() }
 
   const executeBridge = useCallback(async (params: ExecuteBridgeParams) => {
     const { fromChain, toChain, amount, walletAddress, recipientAddress, onEvent } = params
-    const isArcSource = fromChain === BRIDGE_KIT_CHAIN_ARC
+
+    // ── Config — semua perbedaan ada di sini, bukan di logika ─────────
+    const src = CHAIN_CFG[fromChain]
+    const dst = CHAIN_CFG[toChain]
+    if (!src || !dst) throw new Error(`Chain tidak didukung: ${fromChain} → ${toChain}`)
+
     const dest        = (recipientAddress?.trim() || walletAddress) as `0x${string}`
     const amountUnits = parseUnits(amount, 6)
 
     const eth = getEvmProvider()
     if (!eth) throw new Error('Wallet tidak terdeteksi')
 
-    abortRef.current = new AbortController()
+    abortCtrl.current = new AbortController()
     setIsLoading(true)
     setError(null)
     setResult(null)
 
     const txRecord = addTx({
       type: 'bridge', status: 'pending',
-      direction: isArcSource ? 'arc-to-sepolia' : 'sepolia-to-arc',
-      fromChain: isArcSource ? 'Arc Testnet' : 'Ethereum Sepolia',
-      toChain:   isArcSource ? 'Ethereum Sepolia' : 'Arc Testnet',
+      direction: fromChain === BRIDGE_KIT_CHAIN_ARC ? 'arc-to-sepolia' : 'sepolia-to-arc',
+      fromChain: src.explorer.includes('arcscan') ? 'Arc Testnet' : 'Ethereum Sepolia',
+      toChain:   dst.explorer.includes('arcscan') ? 'Arc Testnet' : 'Ethereum Sepolia',
       amountSent: amount, wallet: walletAddress,
     })
 
     try {
-      // ── Setup clients ──────────────────────────────────────────────
-      const srcChain  = isArcSource ? arcTestnet as any : sepolia
-      const srcClient = isArcSource
-        ? createPublicClient({ chain: arcTestnet as any, transport: fallback([http(ARC_RPC), http(ARC_RPC_BACKUP), http(ARC_RPC_BACKUP2)]) }) as any
-        : createPublicClient({ chain: sepolia, transport: fallback([http(SEPOLIA_RPC), http(SEPOLIA_RPC_BACKUP), http(SEPOLIA_RPC_FALLBACK3)]) })
+      // ── Setup viem clients ─────────────────────────────────────────
+      const srcClient = createPublicClient({
+        chain:     src.viemChain,
+        transport: fallback(src.rpcUrls.map(u => http(u))),
+      }) as any
 
       const walletClient = createWalletClient({
-        chain:     srcChain,
+        chain:     src.viemChain,
         transport: custom(eth),
         account:   walletAddress as `0x${string}`,
       })
 
-      const srcUsdc      = isArcSource ? ARC_USDC      : SEPOLIA_USDC
-      const srcMessenger = isArcSource ? ARC_TOKEN_MESSENGER : SEPOLIA_TOKEN_MESSENGER
-      const dstDomain    = isArcSource ? SEPOLIA_CCTP_DOMAIN : ARC_CCTP_DOMAIN
-      const srcDomain    = isArcSource ? ARC_CCTP_DOMAIN : SEPOLIA_CCTP_DOMAIN
-      const srcRpc       = isArcSource ? ARC_RPC : SEPOLIA_RPC
-      const srcRpcBackup = isArcSource ? ARC_RPC_BACKUP : SEPOLIA_RPC_BACKUP
-
-      // ── Switch chain ───────────────────────────────────────────────
-      const chainIdHex = isArcSource ? ARC_CHAIN_ID_HEX : SEPOLIA_CHAIN_ID_HEX
-      if (isArcSource) {
+      // ── Switch ke source chain ─────────────────────────────────────
+      // Jika chain punya addChainParams, pakai wallet_addEthereumChain
+      // (override nama chain yang salah di wallet, misal "Core" → "Arc Testnet")
+      if (src.addChainParams) {
         try {
-          await eth.request({
-            method: 'wallet_addEthereumChain',
-            params: [{
-              chainId: ARC_CHAIN_ID_HEX, chainName: 'Arc Testnet',
-              rpcUrls: [ARC_RPC],
-              nativeCurrency: { name: 'USDC', symbol: 'USDC', decimals: 6 },
-              blockExplorerUrls: [ARC_EXPLORER],
-            }],
-          })
+          await eth.request({ method: 'wallet_addEthereumChain', params: [src.addChainParams] })
         } catch (e: any) {
           if (e?.code === 4001) throw new Error('User menolak switch chain')
-          await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: chainIdHex }] })
+          // Chain sudah ada → fallback ke switchEthereumChain
+          await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: src.chainIdHex }] })
         }
       } else {
-        await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: chainIdHex }] })
+        await eth.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: src.chainIdHex }] })
       }
 
-      // ── Step 1: Approve ERC-20 standar (bukan Permit2) ────────────
+      // ── Step 1: Approve ERC-20 standar ────────────────────────────
       onEvent('approve', 'pending')
       const allowance = await srcClient.readContract({
-        address: srcUsdc, abi: erc20Abi, functionName: 'allowance',
-        args: [walletAddress as `0x${string}`, srcMessenger],
+        address: src.usdc, abi: erc20Abi, functionName: 'allowance',
+        args: [walletAddress as `0x${string}`, src.tokenMessenger],
       }) as bigint
 
       if (allowance < amountUnits) {
-        const approveArgs: any = {
-          address: srcUsdc, abi: erc20Abi, functionName: 'approve',
-          args: [srcMessenger, amountUnits],
-          account: walletAddress as `0x${string}`,
-        }
-        if (isArcSource) approveArgs.gas = 100_000n
-
-        const approveTxHash = await (walletClient as any).writeContract(approveArgs)
-
-        if (isArcSource) {
-          await waitArcReceipt(srcClient, approveTxHash as Hex)
-        } else {
-          await (srcClient as any).waitForTransactionReceipt({
-            hash: approveTxHash as Hex, confirmations: 1,
-            timeout: 180_000, pollingInterval: 3_000,
-          })
-        }
+        const approveTxHash = await (walletClient as any).writeContract({
+          address:      src.usdc,
+          abi:          erc20Abi,
+          functionName: 'approve',
+          args:         [src.tokenMessenger, amountUnits],
+          account:      walletAddress as `0x${string}`,
+          ...(src.approveGas ? { gas: src.approveGas } : {}),
+        })
+        await waitReceipt(srcClient, approveTxHash as Hex, src)
         onEvent('approve', 'success', approveTxHash)
       } else {
-        onEvent('approve', 'success') // sudah approved sebelumnya
+        onEvent('approve', 'success') // allowance sudah cukup
       }
 
-      if (abortRef.current.signal.aborted) throw new Error('Bridge dibatalkan')
+      if (abortCtrl.current.signal.aborted) throw new Error('Bridge dibatalkan')
 
       // ── Step 2: Burn (depositForBurn) ──────────────────────────────
       onEvent('burn', 'pending')
-      const burnArgs: any = {
-        address: srcMessenger, abi: TOKEN_MESSENGER_ABI, functionName: 'depositForBurn',
-        args: [amountUnits, dstDomain, addrToBytes32(dest), srcUsdc, ZERO_BYTES32, CCTP_MAX_FEE, CCTP_FAST_FINALITY],
-        account: walletAddress as `0x${string}`,
-      }
-      if (isArcSource) burnArgs.gas = 300_000n
+      const burnTxHash = await (walletClient as any).writeContract({
+        address:      src.tokenMessenger,
+        abi:          TOKEN_MESSENGER_ABI,
+        functionName: 'depositForBurn',
+        args:         [amountUnits, dst.domain, addrToBytes32(dest), src.usdc, ZERO_BYTES32, CCTP_MAX_FEE, CCTP_FAST_FINALITY],
+        account:      walletAddress as `0x${string}`,
+        ...(src.burnGas ? { gas: src.burnGas } : {}),
+      }) as string
 
-      const burnTxHash = await (walletClient as any).writeContract(burnArgs) as string
       updateTx(txRecord.id, { burnTx: burnTxHash, status: 'attestation' }, walletAddress)
+      const burnReceipt = await waitReceipt(srcClient, burnTxHash as Hex, src)
 
-      let burnReceipt: any
-      if (isArcSource) {
-        burnReceipt = await waitArcReceipt(srcClient, burnTxHash as Hex)
-      } else {
-        burnReceipt = await (srcClient as any).waitForTransactionReceipt({
-          hash: burnTxHash as Hex, confirmations: 1,
-          timeout: 180_000, pollingInterval: 3_000,
-        })
-      }
-
-      let msgBytes = extractMessageBytes(burnReceipt.logs as Log[])
-      if (!msgBytes) msgBytes = await fetchMsgBytesFromRpc(srcRpc, burnTxHash, Number(burnReceipt.blockNumber))
-      if (!msgBytes) msgBytes = await fetchMsgBytesFromRpc(srcRpcBackup, burnTxHash, Number(burnReceipt.blockNumber))
+      // Extract messageBytes dari receipt
+      let msgBytes = extractMessageBytes(burnReceipt.logs)
+      if (!msgBytes) msgBytes = await fetchMsgBytesFromRpc(src.rpcUrls[0], burnTxHash, Number(burnReceipt.blockNumber))
+      if (!msgBytes && src.rpcUrls[1]) msgBytes = await fetchMsgBytesFromRpc(src.rpcUrls[1], burnTxHash, Number(burnReceipt.blockNumber))
       if (!msgBytes) throw new Error('MessageSent event tidak ditemukan di receipt')
 
       const messageHash = keccak256(msgBytes)
       onEvent('burn', 'success', burnTxHash)
 
-      if (abortRef.current.signal.aborted) throw new Error('Bridge dibatalkan')
+      if (abortCtrl.current.signal.aborted) throw new Error('Bridge dibatalkan')
 
       // ── Step 3: Attestation dari browser ──────────────────────────
       onEvent('fetchAttestation', 'pending')
       const attestation = await pollAttestation(
-        srcDomain, burnTxHash, messageHash, isArcSource,
+        src.domain, burnTxHash, messageHash,
         (msg) => onEvent('fetchAttestation', 'pending', undefined, msg),
-        abortRef.current.signal,
+        abortCtrl.current.signal,
       )
       onEvent('fetchAttestation', 'success')
 
-      if (abortRef.current.signal.aborted) throw new Error('Bridge dibatalkan')
+      if (abortCtrl.current.signal.aborted) throw new Error('Bridge dibatalkan')
 
       // ── Step 4: Mint via server relayer ───────────────────────────
       onEvent('mint', 'pending')
-      const direction = isArcSource ? 'arc-to-sepolia' : 'sepolia-to-arc'
+      const direction = fromChain === BRIDGE_KIT_CHAIN_ARC ? 'arc-to-sepolia' : 'sepolia-to-arc'
       const mintRes = await fetch('/api/bridge/mint', {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ msgBytes, att: attestation, direction }),
@@ -350,7 +379,7 @@ export function useBridge() {
         throw new Error(mintData.error || 'Mint gagal di destination chain')
       }
 
-      const mintTxHash = mintData.txHash as string | null
+      const mintTxHash  = mintData.txHash as string | null
       const explorerUrl = mintData.explorerUrl as string | null
       onEvent('mint', 'success', mintTxHash ?? undefined)
       updateTx(txRecord.id, { mintTx: mintTxHash ?? '', status: 'success' }, walletAddress)
@@ -360,11 +389,11 @@ export function useBridge() {
       return { ok: true, mintTxHash, explorerUrl }
 
     } catch (e: any) {
-      if (abortRef.current.signal.aborted) return { ok: false, error: 'Bridge dibatalkan' }
+      if (abortCtrl.current.signal.aborted) return { ok: false, error: 'Bridge dibatalkan' }
       const msg = e?.shortMessage || e?.message || 'Bridge gagal'
       setError(msg)
       updateTx(txRecord.id, { status: 'failed', errorMsg: msg }, walletAddress)
-      onEvent('approve', 'error', undefined, msg) // trigger error state di UI
+      onEvent('approve', 'error', undefined, msg)
       throw e
     } finally {
       setIsLoading(false)
@@ -372,14 +401,14 @@ export function useBridge() {
   }, [])
 
   function clear() {
-    abortRef.current.abort()
+    abortCtrl.current.abort()
     setError(null)
     setResult(null)
     setIsLoading(false)
   }
 
-  // estimate tidak dipakai lagi tapi dipertahankan untuk kompatibilitas
-  async function estimate(_params: any) { return null }
+  // Stub untuk kompatibilitas
+  async function estimate(_p: any) { return null }
   async function retry(_r: any, _p: any, _o: any) { return { ok: false } }
 
   return { executeBridge, isLoading, error, result, clear, estimate, retry }
