@@ -12,7 +12,6 @@
 
 import React, { useState, useEffect, useCallback } from 'react'
 import { useSwitchChain } from 'wagmi'
-import { BridgeKit } from '@circle-fin/bridge-kit'
 import {
   BRIDGE_KIT_CHAIN_ARC, BRIDGE_KIT_CHAIN_SEPOLIA,
   ARC_EXPLORER, SEPOLIA_EXPLORER,
@@ -101,7 +100,11 @@ export default function BridgePanel() {
   const [amount,           setAmount]           = useState('')
   const [recipient,        setRecipient]        = useState('')
   const [useRecipient,     setUseRecipient]     = useState(false)
-  const [availableChains,  setAvailableChains]  = useState<SupportedChain[]>([])
+  // Hanya 2 chain yang didukung — Arc Testnet ↔ Ethereum Sepolia
+  const availableChains: SupportedChain[] = [
+    { chain: BRIDGE_KIT_CHAIN_SEPOLIA, name: 'Ethereum Sepolia', chainId: 11155111, isTestnet: true },
+    { chain: BRIDGE_KIT_CHAIN_ARC,     name: 'Arc Testnet',      chainId: 5042002,  isTestnet: true },
+  ]
   const [feeEstimate,      setFeeEstimate]      = useState<string | null>(null)
   const [fetchingFee,      setFetchingFee]      = useState(false)
 
@@ -117,28 +120,6 @@ export default function BridgePanel() {
   const isBusy = isLoading
   const isDone = currentStep === 'completed'
   const isErr  = currentStep === 'error' || !!error
-
-  /* ── Fetch supported chains dari BridgeKit ────────────────────────── */
-  useEffect(() => {
-    ;(async () => {
-      try {
-        const kit    = new BridgeKit()
-        const all    = await kit.getSupportedChains() as SupportedChain[]
-        // Filter testnet saja
-        const nets   = all.filter(c => c.isTestnet === true)
-        setAvailableChains(nets.length > 0 ? nets : [
-          { chain: BRIDGE_KIT_CHAIN_SEPOLIA, name: 'Ethereum Sepolia', isTestnet: true },
-          { chain: BRIDGE_KIT_CHAIN_ARC,     name: 'Arc Testnet',      isTestnet: true },
-        ])
-      } catch {
-        // Fallback jika BridgeKit tidak bisa fetch chains
-        setAvailableChains([
-          { chain: BRIDGE_KIT_CHAIN_SEPOLIA, name: 'Ethereum Sepolia', isTestnet: true },
-          { chain: BRIDGE_KIT_CHAIN_ARC,     name: 'Arc Testnet',      isTestnet: true },
-        ])
-      }
-    })()
-  }, [])
 
   /* ── Estimasi fee saat amount berubah ─────────────────────────────── */
   useEffect(() => {
