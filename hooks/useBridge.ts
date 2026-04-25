@@ -10,7 +10,7 @@
 
 import { useState, useCallback } from 'react'
 import {
-  createWalletClient, createPublicClient, custom, http, fallback,
+  createPublicClient, http, fallback,
   parseUnits, erc20Abi, keccak256, type Hex,
 } from 'viem'
 import { sepolia } from 'viem/chains'
@@ -299,12 +299,6 @@ export function useBridge() {
         transport: fallback(src.rpcUrls.map(u => http(u))),
       }) as any
 
-      const walletClient = createWalletClient({
-        chain:     src.viemChain,
-        transport: custom(eth),
-        account:   walletAddress as `0x${string}`,
-      })
-
       // ── Switch ke source chain ─────────────────────────────────────
       // Jika chain punya addChainParams, pakai wallet_addEthereumChain
       // (override nama chain yang salah di wallet, misal "Core" → "Arc Testnet")
@@ -328,14 +322,25 @@ export function useBridge() {
       }) as bigint
 
       if (allowance < amountUnits) {
-        const approveTxHash = await (walletClient as any).writeContract({
-          address:      src.usdc,
-          abi:          erc20Abi,
+        // Encode approve calldata langsung — tidak lewat viem walletClient
+        // agar kompatibel dengan semua wallet termasuk OKX di Arc
+        const { encodeFunctionData } = await import('viem')
+        const approveData = encodeFunctionData({
+          abi: erc20Abi,
           functionName: 'approve',
-          args:         [src.tokenMessenger, amountUnits],
-          account:      walletAddress as `0x${string}`,
-          ...(src.approveGas ? { gas: src.approveGas } : {}),
+          args: [src.tokenMessenger, amountUnits],
         })
+
+        const approveTxHash = await eth.request({
+          method: 'eth_sendTransaction',
+          params: [{
+            from:  walletAddress,
+            to:    src.usdc,
+            data:  approveData,
+            ...(src.approveGas ? { gas: `0x${src.approveGas.toString(16)}` } : {}),
+          }],
+        }) as string
+
         await waitReceipt(srcClient, approveTxHash as Hex, src)
         onEvent('approve', 'success', approveTxHash)
       } else {
@@ -346,13 +351,21 @@ export function useBridge() {
 
       // ── Step 2: Burn (depositForBurn) ──────────────────────────────
       onEvent('burn', 'pending')
-      const burnTxHash = await (walletClient as any).writeContract({
-        address:      src.tokenMessenger,
+      const { encodeFunctionData: encodeDepositForBurn } = await import('viem')
+      const burnData = encodeDepositForBurn({
         abi:          TOKEN_MESSENGER_ABI,
         functionName: 'depositForBurn',
         args:         [amountUnits, dst.domain, addrToBytes32(dest), src.usdc, ZERO_BYTES32, CCTP_MAX_FEE, CCTP_FAST_FINALITY],
-        account:      walletAddress as `0x${string}`,
-        ...(src.burnGas ? { gas: src.burnGas } : {}),
+      })
+
+      const burnTxHash = await eth.request({
+        method: 'eth_sendTransaction',
+        params: [{
+          from: walletAddress,
+          to:   src.tokenMessenger,
+          data: burnData,
+          ...(src.burnGas ? { gas: `0x${src.burnGas.toString(16)}` } : {}),
+        }],
       }) as string
 
       updateTx(txRecord.id, { burnTx: burnTxHash, status: 'attestation' }, walletAddress)
