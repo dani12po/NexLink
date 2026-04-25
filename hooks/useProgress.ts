@@ -59,8 +59,8 @@ export function useProgress() {
     if (method === 'approve') {
       if (state === 'pending') {
         setCurrentStep('approving')
-        const msg = extra
-          ? `Tx terkirim: ${txHash ? maskTx(txHash) : ''} — ${extra}`
+        const msg = (error || txHash)
+          ? `Tx terkirim: ${txHash ? maskTx(txHash) : ''} — menunggu konfirmasi Arc…`
           : 'Menunggu persetujuan USDC di wallet…'
         addLog('approving', msg, txHash)
       } else if (state === 'success') {
