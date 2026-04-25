@@ -1,23 +1,16 @@
 'use client'
 
 import React from 'react'
-import { WagmiProvider, createConfig, http } from 'wagmi'
-import { base } from 'wagmi/chains'
+import { WagmiProvider } from 'wagmi'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { wagmiConfig } from '@/lib/wagmiConfig'
 
+// QueryClient singleton — jangan buat di dalam komponen agar tidak re-create tiap render
 const queryClient = new QueryClient()
-
-const config = createConfig({
-  chains: [base],
-  // PENTING: jangan set connectors manual, biar wagmi tidak menarik @wagmi/connectors barrel
-  transports: {
-    [base.id]: http(process.env.NEXT_PUBLIC_BASE_RPC_URL || 'https://mainnet.base.org'),
-  },
-})
 
 export default function Providers({ children }) {
   return (
-    <WagmiProvider config={config}>
+    <WagmiProvider config={wagmiConfig}>
       <QueryClientProvider client={queryClient}>
         {children}
       </QueryClientProvider>
