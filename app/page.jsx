@@ -70,6 +70,7 @@ export default function Page() {
   const { toasts, push, remove } = useToast()
   const { address: connectedAddress } = useWallet()
 
+  const [mounted,             setMounted]             = useState(false)
   const [freeWallet,          setFreeWallet]          = useState('')
   const [freeMsg,             setFreeMsg]             = useState('')
   const [freeBusy,            setFreeBusy]            = useState(false)
@@ -77,13 +78,15 @@ export default function Page() {
   const [freeFollowConfirmed, setFreeFollowConfirmed] = useState(false)
   const [freeFollowEnabled,   setFreeFollowEnabled]   = useState(false)
 
+  // Mount guard — hindari hydration mismatch dari wallet state
+  useEffect(() => { setMounted(true) }, [])
+
   // Auto-fill wallet dari connected wallet
   useEffect(() => {
     if (connectedAddress && !freeWallet) {
       setFreeWallet(connectedAddress)
     }
   }, [connectedAddress])
-
   // Countdown tick
   useEffect(() => {
     if (freeCountdown <= 0) return
@@ -202,14 +205,14 @@ export default function Page() {
               value={freeWallet}
               onChange={(e) => setFreeWallet(e.target.value)}
               placeholder="Paste wallet address"
-              readOnly={Boolean(connectedAddress)}
+              readOnly={mounted && Boolean(connectedAddress)}
               className={`w-full px-3 py-2.5 rounded-xl border text-sm outline-none transition-colors ${
-                connectedAddress
+                mounted && connectedAddress
                   ? 'border-emerald-800/50 bg-emerald-500/5 text-emerald-300 cursor-default'
                   : 'border-zinc-800 bg-black/30 focus:border-zinc-600'
               }`}
             />
-            {connectedAddress && (
+            {mounted && connectedAddress && (
               <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-emerald-500/70">
                 ✓ wallet
               </span>

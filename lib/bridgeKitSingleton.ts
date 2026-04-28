@@ -1,41 +1,27 @@
 /**
  * lib/bridgeKitSingleton.ts
- * Shared BridgeKit singleton — satu instance untuk seluruh app.
- * Dipakai oleh: hooks/useBridge.ts, hooks/useUsdcBalance.ts
+ * Shared AppKit singleton — satu instance untuk seluruh app.
+ * Menggunakan @circle-fin/app-kit sesuai docs resmi Arc Network.
+ * Ref: https://docs.arc.network/app-kit/quickstarts/bridge-tokens-across-blockchains#viem
+ *
+ * Dipakai oleh: hooks/useBridge.ts
  */
-import { BridgeKit } from '@circle-fin/bridge-kit'
+import { AppKit } from '@circle-fin/app-kit'
 
-let _kit: BridgeKit | null = null
+let _kit: AppKit | null = null
 
-export function getBridgeKit(): BridgeKit {
+export function getAppKit(): AppKit {
   if (!_kit) {
-    const kitKey =
-      process.env.NEXT_PUBLIC_KIT_KEY ??
-      process.env.NEXT_PUBLIC_CIRCLE_KIT_KEY ??
-      ''
-
-    if (!kitKey && process.env.NODE_ENV === 'development') {
-      console.warn(
-        '[BridgeKit] NEXT_PUBLIC_KIT_KEY tidak di-set.\n' +
-        'BridgeKit berjalan tanpa auth — rate limit sangat ketat di sandbox.\n' +
-        'Tambahkan NEXT_PUBLIC_KIT_KEY=KIT_KEY:xxx:xxx ke .env.local',
-      )
-    }
-
-    try {
-      _kit = new BridgeKit({ kitKey } as any)
-    } catch (e) {
-      try {
-        _kit = new BridgeKit({ apiKey: kitKey } as any)
-      } catch {
-        _kit = new BridgeKit({} as any)
-        console.error('[BridgeKit] Gagal inisialisasi dengan kitKey/apiKey:', e)
-      }
-    }
+    // AppKit tidak butuh API key untuk bridge — cukup inisialisasi kosong
+    _kit = new AppKit()
   }
   return _kit
 }
 
-export function resetBridgeKit(): void {
+export function resetAppKit(): void {
   _kit = null
 }
+
+// Backward compat alias
+export const getBridgeKit = getAppKit
+export const resetBridgeKit = resetAppKit

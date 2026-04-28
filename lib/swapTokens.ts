@@ -2,9 +2,9 @@
  * lib/swapTokens.ts
  * Token constants dan swap utilities untuk Arc Testnet.
  * Ref: https://docs.arc.network/arc/references/contract-addresses
+ * Ref: https://docs.arc.network/app-kit/quickstarts/swap-tokens-same-chain
  *
- * CATATAN: kit.swap() TIDAK tersedia di Arc Testnet.
- * Swap via FxEscrow transfer langsung ke 0x867650...
+ * Swap via AppKit.swap() — USDC ↔ EURC di Arc Testnet.
  */
 import { ARC_USDC, ARC_EURC } from './arcChain'
 
@@ -19,11 +19,12 @@ export interface TokenInfo {
 }
 
 export const SWAP_TOKENS: TokenInfo[] = [
-  { symbol: 'USDC', name: 'USD Coin',  address: ARC_USDC, decimals: 6, emoji: '$' },
-  { symbol: 'EURC', name: 'Euro Coin', address: ARC_EURC, decimals: 6, emoji: '€' },
+  { symbol: 'USDC', name: 'USD Coin',  address: ARC_USDC, decimals: 6, emoji: '💵' },
+  { symbol: 'EURC', name: 'Euro Coin', address: ARC_EURC, decimals: 6, emoji: '💶' },
 ]
 
 // Fallback rate jika API tidak tersedia
+// Rate aktual akan dikembalikan oleh AppKit.swap() di result.amountOut
 export const FALLBACK_RATES: Record<string, number> = {
   'USDC-EURC': 0.92,
   'EURC-USDC': 1.087,
@@ -33,14 +34,19 @@ export const FALLBACK_RATES: Record<string, number> = {
 const rateCache: Record<string, { rate: number; ts: number }> = {}
 const CACHE_TTL = 30_000
 
+/**
+ * Ambil estimasi rate untuk display di UI.
+ * Rate aktual ditentukan oleh AppKit saat swap dieksekusi.
+ */
 export async function fetchLiveRate(from: TokenSymbol, to: TokenSymbol): Promise<number> {
   const key = `${from}-${to}`
   const cached = rateCache[key]
   if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.rate
 
-  // StableFX API tidak tersedia di testnet — pakai fallback rate
-  // TODO: ganti dengan endpoint yang benar saat mainnet
-  return FALLBACK_RATES[key] ?? 1
+  // Gunakan fallback rate — rate aktual dari AppKit akan tampil di result
+  const rate = FALLBACK_RATES[key] ?? 1
+  rateCache[key] = { rate, ts: Date.now() }
+  return rate
 }
 
 export interface SwapQuote {

@@ -111,19 +111,31 @@ export default function ClaimPage() {
   }, []);
 
   // ===== X session status =====
+  // /api/x/me returns { ok: bool, data: { id, username, ... } } (original format)
+  // /api/session returns full session state including followed/claimed/paid
   async function refreshXStatus() {
     try {
-      const res = await fetch("/api/x/me", { cache: "no-store" });
-      const j = await res.json();
-      if (j?.ok && j?.loggedIn) {
-        setXLoggedIn(true);
-        setFollowed(Boolean(j.followed));
-        setClaimed(Boolean(j.claimed));
-        if (typeof j.paid === "boolean") setPaid(j.paid);
-      } else {
-        setXLoggedIn(false);
+      // Cek apakah user sudah login X (ada cookie x_access_token)
+      const meRes = await fetch("/api/x/me", { cache: "no-store" });
+      const meJson = await meRes.json();
+      const isLoggedIn = meRes.ok && meJson?.ok === true;
+      setXLoggedIn(isLoggedIn);
+
+      if (!isLoggedIn) {
         setFollowed(false);
         setClaimed(false);
+        return;
+      }
+
+      // Ambil state session (followed, claimed, paid) dari /api/session
+      const sessRes = await fetch("/api/session", { cache: "no-store" });
+      if (sessRes.ok) {
+        const sessJson = await sessRes.json();
+        setFollowed(Boolean(sessJson?.x?.followed));
+        setClaimed(Boolean(sessJson?.claim?.claimed));
+        if (typeof sessJson?.payment?.verified === "boolean") {
+          setPaid(sessJson.payment.verified);
+        }
       }
     } catch {
       // ignore
@@ -273,6 +285,9 @@ export default function ClaimPage() {
       notify("ok", "Paid ✓");
       setBusyPay(false);
 
+      // Simpan txHash untuk dipakai saat claim
+      window.__lastPaymentTxHash = txHash;
+
       // keep lock; if user switches method after paid, no more popup
       refreshXStatus();
     } catch (e) {
@@ -316,15 +331,30 @@ export default function ClaimPage() {
   }
 
   // ===== Claim =====
+  // /api/claim expects { userAddress, txHash, twitterUsername }
+  // txHash comes from the payment step (stored in state after autoPay)
   async function handleClaim() {
     try {
       if (!wallet) return notify("err", "Connect wallet");
       setBusyClaim(true);
 
+      // Build body — claim/route.js requires userAddress + txHash + twitterUsername
+      // txHash should be stored after payment; use a placeholder if not available
+      const claimBody = {
+        userAddress: wallet,
+        txHash: window.__lastPaymentTxHash || "",
+        twitterUsername: "verified", // follow was verified via /api/x/follow
+      };
+
+      if (!claimBody.txHash) {
+        setBusyClaim(false);
+        return notify("err", "Payment txHash missing. Please complete payment first.");
+      }
+
       const res = await fetch("/api/claim", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ wallet }),
+        body: JSON.stringify(claimBody),
       });
       const j = await res.json();
 
@@ -433,7 +463,7 @@ export default function ClaimPage() {
                 busyClaim ? "bg-neutral-700 text-neutral-300 cursor-not-allowed" : "bg-white text-neutral-900 hover:bg-neutral-200",
               ].join(" ")}
             >
-              Claim {REWARD_USDC} USDT
+              Claim {process.env.NEXT_PUBLIC_REWARD_USDC || '10'} USDC
             </button>
             <div className="mt-1 text-center text-[11px] text-neutral-500">Arc Testnet</div>
           </div>

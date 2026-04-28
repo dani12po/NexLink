@@ -125,12 +125,20 @@ let _state: WalletState = {
 
 // ── useWallet hook ─────────────────────────────────────────────────────────
 export function useWallet(): WalletState {
-  const [state, setState] = useState<WalletState>(_state)
+  // Selalu mulai dengan state default (null address) untuk SSR consistency
+  const [state, setState] = useState<WalletState>(() => ({
+    address: null, chainId: null, connected: false, isConnecting: false,
+    connect:    connectWallet,
+    disconnect: disconnectWallet,
+  }))
+
   useEffect(() => {
+    // Setelah mount (client-only), sync dengan state terkini
+    setState(_state)
     _listeners.push(setState)
-    setState(_state) // sync dengan state terkini
     return () => { _listeners = _listeners.filter(fn => fn !== setState) }
   }, [])
+
   return state
 }
 

@@ -83,29 +83,34 @@ export default function HeaderTabs() {
   const router       = useRouter()
   const searchParams = useSearchParams()
 
+  // Mount guard — searchParams bisa berbeda antara SSR dan client
+  const [mounted, setMounted] = React.useState(false)
+  React.useEffect(() => { setMounted(true) }, [])
+
   const currentTab = searchParams.get('tab') || 'bridge'
   const isDapp     = pathname === '/dapp'
   const isFaucet   = pathname === '/'
 
+  // Saat SSR/sebelum mount, render tabs tanpa active state
+  // untuk menghindari hydration mismatch dari searchParams
   return (
-    /* No wrapper div — tabs are direct children of the absolute center container */
     <>
       <Tab
         icon={<BridgeIcon />}
         label="Bridge"
-        isActive={isDapp && currentTab === 'bridge'}
+        isActive={mounted && isDapp && currentTab === 'bridge'}
         onClick={() => router.push('/dapp?tab=bridge')}
       />
       <Tab
         icon={<SwapIcon />}
         label="Swap"
-        isActive={isDapp && currentTab === 'swap'}
+        isActive={mounted && isDapp && currentTab === 'swap'}
         onClick={() => router.push('/dapp?tab=swap')}
       />
       <Tab
         icon={<FaucetIcon />}
         label="Faucet"
-        isActive={isFaucet}
+        isActive={mounted && isFaucet}
         onClick={() => router.push('/')}
       />
     </>

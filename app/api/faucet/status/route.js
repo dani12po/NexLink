@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getArcTreasuryAccount, getArcUsdcBalance6 } from "@/lib/arcSend.js";
+import { getArcTreasuryAccount, getArcUsdcBalance6 } from "@/lib/arcSend";
 
 export const runtime = "nodejs";
 

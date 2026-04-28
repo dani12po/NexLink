@@ -69,7 +69,7 @@ export const SEPOLIA_RPC           = 'https://rpc.ankr.com/eth_sepolia'
 export const SEPOLIA_RPC_BACKUP    = 'https://ethereum-sepolia-rpc.publicnode.com'
 export const SEPOLIA_RPC_FALLBACK3 = 'https://sepolia.drpc.org'
 export const SEPOLIA_RPC_BACKUP2   = SEPOLIA_RPC_FALLBACK3  // alias backward compat
-export const SEPOLIA_CCTP_DOMAIN   = 0
+export const SEPOLIA_CCTP_DOMAIN   = 6    // Circle CCTP V2 domain Sepolia
 
 // ─── CCTP V2 ──────────────────────────────────────────────────────────────────
 export const ARC_CCTP_DOMAIN  = 26       // Arc Testnet domain
